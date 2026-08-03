@@ -490,7 +490,7 @@ function ProtectedApp() {
             <Route path="/" element={<DashboardView state={state} />} />
             <Route
               path="/products"
-              element={<ProductsView state={state} updateState={updateState} />}
+              element={<ProductsView state={state} updateState={updateState} isLoadingProducts={isLoadingProducts} />}
             />
             <Route
               path="/orders"
@@ -621,7 +621,7 @@ function DashboardView({ state }) {
   );
 }
 
-function ProductsView({ state, updateState }) {
+function ProductsView({ state, updateState, isLoadingProducts }) {
   const [draft, setDraft] = useState({
     id: "",
     name: "",
