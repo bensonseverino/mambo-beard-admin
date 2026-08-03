@@ -1,10 +1,18 @@
-export async function onRequest({ request, params }) {
+import { deleteProduct, updateProduct } from "../../lib/products-db.js";
+
+export async function onRequest({ request, params, env }) {
   if (request.method === "PUT") {
     const payload = await request.json().catch(() => ({}));
-    return Response.json({ success: true, id: params.id, data: payload });
+    const updatedProduct = await updateProduct(env, params.id, payload);
+    return Response.json({
+      success: true,
+      id: params.id,
+      data: updatedProduct,
+    });
   }
 
   if (request.method === "DELETE") {
+    await deleteProduct(env, params.id);
     return Response.json({ success: true, id: params.id, deleted: true });
   }
 

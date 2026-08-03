@@ -8,7 +8,7 @@ const sanitizeSegment = (value) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || "product";
 
-export async function onRequest({ request }) {
+export async function onRequest({ request, env }) {
   if (request.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
@@ -65,6 +65,12 @@ export async function onRequest({ request }) {
         : "jpg";
   const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${extension}`;
   const path = `products/${productSlug}/${colorName}/${imageType}/${uniqueName}`;
+
+  if (env?.PRODUCTS) {
+    await env.PRODUCTS.put(path, Buffer.from(arrayBuffer), {
+      httpMetadata: { contentType: mimeType },
+    });
+  }
 
   return Response.json({
     success: true,

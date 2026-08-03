@@ -284,7 +284,7 @@ function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(250,204,21,0.28),_transparent_40%),linear-gradient(135deg,#020617_0%,#111827_100%)] px-4 py-12 text-slate-100">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(250,204,21,0.28),transparent_40%),linear-gradient(135deg,#020617_0%,#111827_100%)] px-4 py-12 text-slate-100">
       <div className="mx-auto flex max-w-6xl flex-col gap-8 rounded-3xl border border-white/10 bg-slate-900/70 p-8 shadow-2xl shadow-slate-950/60 backdrop-blur lg:flex-row lg:p-12">
         <div className="flex-1 space-y-6">
           <div className="inline-flex rounded-full border border-amber-400/30 bg-amber-500/10 px-3 py-1 text-sm font-medium text-amber-300">
@@ -379,6 +379,7 @@ function ProtectedApp() {
     }
     return null;
   });
+  const [isLoadingProducts, setIsLoadingProducts] = useState(true);
 
   useEffect(() => {
     localStorage.setItem("mambo-admin-state", JSON.stringify(state));
@@ -388,6 +389,34 @@ function ProtectedApp() {
     if (auth) {
       localStorage.setItem("mambo-admin-auth", JSON.stringify(auth));
     }
+  }, [auth]);
+
+  useEffect(() => {
+    if (!auth) return;
+
+    const loadProducts = async () => {
+      try {
+        const token = localStorage.getItem("mambo-admin-token") || "";
+        const response = await fetch("/api/products", {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        const payload = await response.json();
+        if (response.ok && payload.success) {
+          setState((current) => ({
+            ...current,
+            products: payload.data || [],
+          }));
+        }
+      } catch (error) {
+        console.error("Failed to load products", error);
+      } finally {
+        setIsLoadingProducts(false);
+      }
+    };
+
+    void loadProducts();
   }, [auth]);
 
   if (!auth) {
@@ -613,7 +642,7 @@ function ProductsView({ state, updateState }) {
   );
   const isPublishable = validationMessages.length === 0;
 
-  const saveProduct = (event) => {
+  const saveProduct = async (event) => {
     event.preventDefault();
     const normalized = {
       ...draft,
@@ -632,32 +661,71 @@ function ProductsView({ state, updateState }) {
         : [createColorTemplate(0)],
     };
 
-    updateState((current) => ({
-      ...current,
-      products: draft.id
-        ? current.products.map((product) =>
-            product.id === draft.id ? normalized : product,
-          )
-        : [...current.products, normalized],
-    }));
-    setDraft({
-      id: "",
-      name: "",
-      slug: "",
-      description: "",
-      price: "",
-      category: "Care",
-      featured: false,
-      active: true,
-      colors: [],
-    });
+    try {
+      const token = localStorage.getItem("mambo-admin-token") || "";
+      const method = draft.id ? "PUT" : "POST";
+      const url = draft.id ? `/api/products/${draft.id}` : "/api/products";
+      const response = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(normalized),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || "Unable to save product");
+      }
+
+      const savedProduct = payload.data;
+      updateState((current) => ({
+        ...current,
+        products: draft.id
+          ? current.products.map((product) =>
+              product.id === draft.id ? savedProduct : product,
+            )
+          : [...current.products, savedProduct],
+      }));
+      setDraft({
+        id: "",
+        name: "",
+        slug: "",
+        description: "",
+        price: "",
+        category: "Care",
+        featured: false,
+        active: true,
+        colors: [],
+      });
+    } catch (error) {
+      console.error("Unable to save product", error);
+    }
   };
 
-  const removeProduct = (productId) => {
-    updateState((current) => ({
-      ...current,
-      products: current.products.filter((product) => product.id !== productId),
-    }));
+  const removeProduct = async (productId) => {
+    try {
+      const token = localStorage.getItem("mambo-admin-token") || "";
+      const response = await fetch(`/api/products/${productId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || "Unable to delete product");
+      }
+
+      updateState((current) => ({
+        ...current,
+        products: current.products.filter(
+          (product) => product.id !== productId,
+        ),
+      }));
+    } catch (error) {
+      console.error("Unable to delete product", error);
+    }
   };
 
   const updateColor = (colorId, changes) => {
@@ -1480,6 +1548,11 @@ function ProductsView({ state, updateState }) {
         </form>
       </section>
       <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+        {isLoadingProducts ? (
+          <p className="text-sm text-slate-400">
+            Loading products from the backend…
+          </p>
+        ) : null}
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm text-slate-300">
             <thead className="text-xs uppercase tracking-[0.2em] text-slate-500">
