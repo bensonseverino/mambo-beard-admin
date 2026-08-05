@@ -60,6 +60,7 @@ test("ensureSchema creates every table including orders (the D1_ERROR fix)", asy
     "inventory",
     "orders",
     "order_items",
+    "customers",
   ]) {
     assert.ok(Array.isArray(env.DB._rows(table)), `${table} should exist`);
   }
@@ -95,6 +96,92 @@ test("checkout creates order, order items, and reduces inventory atomically", as
   // The storefront-facing product list reflects the new stock.
   const products = await listProducts(env);
   assert.equal(products[0].colors[0].variants[0].stock, 3);
+});
+
+test("checkout creates a customer on the first order and updates them on repeat orders", async () => {
+  const env = await makeEnv();
+  await seedProduct(env);
+
+  // First order: customer row is created.
+  await createOrder(env, basePayload());
+  let customers = env.DB._rows("customers");
+  assert.equal(customers.length, 1);
+  assert.equal(customers[0].phone, "+254700000000");
+  assert.equal(customers[0].name, "Jane Doe");
+  assert.equal(customers[0].email, "jane@example.com");
+  assert.equal(customers[0].location, "Westlands");
+  assert.equal(customers[0].total_orders, 1);
+  assert.equal(customers[0].lifetime_spend, 198);
+
+  // Repeat order with the same phone: same row, updated fields + counters.
+  // Quantity 1 → total 174 (24 + 150 delivery), so stock 5 - 2 - 1 stays ≥ 0.
+  await createOrder(env, {
+    ...basePayload(),
+    items: [{ productId: "prod-1", colorId: "color-1", size: "M", quantity: 1 }],
+    customer: {
+      name: "Jane D. Smith",
+      phone: "+254700000000",
+      email: "jane.new@example.com",
+      location: "Kilimani",
+    },
+  });
+  customers = env.DB._rows("customers");
+  assert.equal(customers.length, 1);
+  assert.equal(customers[0].name, "Jane D. Smith");
+  assert.equal(customers[0].email, "jane.new@example.com");
+  assert.equal(customers[0].location, "Kilimani");
+  assert.equal(customers[0].total_orders, 2);
+  assert.equal(customers[0].lifetime_spend, 372); // 198 + 174
+
+  // A different phone becomes a separate customer.
+  await createOrder(env, {
+    ...basePayload(),
+    items: [{ productId: "prod-1", colorId: "color-1", size: "M", quantity: 1 }],
+    customer: {
+      name: "Bob Mwangi",
+      phone: "+254711111111",
+      email: "bob@example.com",
+      location: "Nairobi CBD",
+    },
+  });
+  customers = env.DB._rows("customers");
+  assert.equal(customers.length, 2);
+  assert.equal(
+    customers.find((c) => c.phone === "+254711111111").total_orders,
+    1,
+  );
+});
+
+test("customer upsert merges on phone conflict instead of duplicating (race path)", async () => {
+  const env = await makeEnv();
+
+  // Simulate two concurrent first orders for the same phone: both checkout
+  // SELECTs miss each other, so both fire the upsert INSERT. The second must
+  // merge into the first row (ON CONFLICT DO UPDATE) — never create a dupe.
+  const upsert = (id, name, spend) =>
+    env.DB.prepare(
+      `INSERT INTO customers (id, phone, name, email, location, total_orders, lifetime_spend, last_order_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(phone) DO UPDATE SET
+         name = excluded.name,
+         email = excluded.email,
+         location = excluded.location,
+         total_orders = customers.total_orders + 1,
+         lifetime_spend = customers.lifetime_spend + excluded.lifetime_spend,
+         last_order_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).bind(id, "+254700000000", name, `${id}@example.com`, "Westlands", spend);
+
+  await upsert("cus-1", "Jane", 198).run();
+  await upsert("cus-2", "Jane Doe", 174).run();
+
+  const rows = env.DB._rows("customers");
+  assert.equal(rows.length, 1); // merged, not duplicated
+  assert.equal(rows[0].id, "cus-1"); // first row won
+  assert.equal(rows[0].name, "Jane Doe"); // latest fields won
+  assert.equal(rows[0].email, "cus-2@example.com");
+  assert.equal(rows[0].total_orders, 2);
+  assert.equal(rows[0].lifetime_spend, 372); // 198 + 174
 });
 
 test("insufficient stock rejects the order with a structured error and writes nothing", async () => {

@@ -168,6 +168,13 @@ export const createOrder = async (env, payload) => {
     });
   }
 
+  // ── Customer: find by phone so checkout updates or creates the record ──
+  const existingCustomer = await env.DB.prepare(
+    "SELECT id FROM customers WHERE phone = ?",
+  )
+    .bind(phone)
+    .first();
+
   // ── Write phase (single atomic batch) ──────────────────────────────────
   const now = new Date();
   const orderId = `ord-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -175,6 +182,32 @@ export const createOrder = async (env, payload) => {
   const total = subtotal + deliveryFee;
 
   const statements = [
+    existingCustomer
+      ? env.DB.prepare(
+          `UPDATE customers SET name = ?, email = ?, location = ?,
+           total_orders = total_orders + 1, lifetime_spend = lifetime_spend + ?,
+           last_order_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+        ).bind(name, email || null, location || null, total, existingCustomer.id)
+      : env.DB.prepare(
+          `INSERT INTO customers (id, phone, name, email, location, total_orders, lifetime_spend, last_order_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(phone) DO UPDATE SET
+             name = excluded.name,
+             email = excluded.email,
+             location = excluded.location,
+             total_orders = customers.total_orders + 1,
+             lifetime_spend = customers.lifetime_spend + excluded.lifetime_spend,
+             last_order_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP`,
+        ).bind(
+          `cus-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+          phone,
+          name,
+          email || null,
+          location || null,
+          total,
+        ),
     env.DB.prepare(
       `INSERT INTO orders (id, order_number, customer_name, phone, email, location, delivery_fee, subtotal, total, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,

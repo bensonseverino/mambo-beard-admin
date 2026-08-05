@@ -94,6 +94,19 @@ export const SCHEMA_STATEMENTS = [
     FOREIGN KEY(color_id) REFERENCES product_colors(id) ON DELETE CASCADE,
     FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS customers (
+    id TEXT PRIMARY KEY,
+    phone TEXT NOT NULL,
+    name TEXT,
+    email TEXT,
+    location TEXT,
+    total_orders INTEGER NOT NULL DEFAULT 0,
+    lifetime_spend INTEGER NOT NULL DEFAULT 0,
+    last_order_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone)`,
   `CREATE TABLE IF NOT EXISTS admins (
     id TEXT PRIMARY KEY,
     email TEXT UNIQUE NOT NULL,
@@ -117,9 +130,28 @@ export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUE
 export const ensureSchema = async (env) => {
   const db = env?.DB;
   if (!db) return;
-  const statements = SCHEMA_STATEMENTS.map((sql) => db.prepare(sql));
+  const indexStatement = SCHEMA_STATEMENTS.find((sql) =>
+    sql.startsWith("CREATE UNIQUE INDEX"),
+  );
+  const statements = SCHEMA_STATEMENTS.filter(
+    (sql) => !sql.startsWith("CREATE UNIQUE INDEX"),
+  ).map((sql) => db.prepare(sql));
   statements.push(db.prepare(SIZE_SEED_STATEMENT));
   await db.batch(statements);
+
+  // A pre-existing customers table with duplicate phones would make the
+  // unique index fail to build. Catch it so one dirty table can't take down
+  // every handler that bootstraps the schema.
+  if (indexStatement) {
+    try {
+      await db.prepare(indexStatement).run();
+    } catch (error) {
+      console.warn(
+        "[schema] Could not create unique index on customers(phone):",
+        error?.message || error,
+      );
+    }
+  }
 };
 
 /** Require the D1 binding; throws a structured error when it is missing. */

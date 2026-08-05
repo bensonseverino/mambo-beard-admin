@@ -101,6 +101,21 @@ CREATE TABLE IF NOT EXISTS order_items (
   FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS customers (
+  id TEXT PRIMARY KEY,
+  phone TEXT NOT NULL,
+  name TEXT,
+  email TEXT,
+  location TEXT,
+  total_orders INTEGER NOT NULL DEFAULT 0,
+  lifetime_spend INTEGER NOT NULL DEFAULT 0,
+  last_order_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone);
+
 CREATE TABLE IF NOT EXISTS admins (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,

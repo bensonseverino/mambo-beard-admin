@@ -2,7 +2,9 @@
 //
 // Supports the SQL subset used by the admin backend:
 //   CREATE TABLE IF NOT EXISTS ...
+//   CREATE UNIQUE INDEX IF NOT EXISTS ... (no-op)
 //   INSERT [OR IGNORE] INTO t (cols) VALUES (...), (...)
+//   INSERT INTO t (cols) VALUES (...) ON CONFLICT(col) DO UPDATE SET ...
 //   SELECT cols FROM t [WHERE ...] [ORDER BY ...] [LIMIT n]
 //   SELECT COUNT(*) / SUM(col) / COALESCE(SUM(col), 0) ... FROM t [WHERE ...]
 //   UPDATE t SET col = <expr> WHERE ...
@@ -29,6 +31,35 @@ const splitTopLevel = (text, separator) => {
   }
   parts.push(current);
   return parts;
+};
+
+const applyUpsertSet = (existing, incoming, setClause) => {
+  for (const assignment of splitTopLevel(setClause, ",")) {
+    const eq = assignment.indexOf("=");
+    const column = assignment.slice(0, eq).trim();
+    const expression = assignment.slice(eq + 1).trim();
+    const excludedRef = expression.match(/^excluded\.([a-zA-Z_][a-zA-Z0-9_]*)$/);
+    if (excludedRef) {
+      existing[column] = incoming[excludedRef[1]];
+      continue;
+    }
+    const plusNumber = expression.match(
+      /^[a-zA-Z_][a-zA-Z0-9_]*\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\+\s*(-?\d+)$/,
+    );
+    if (plusNumber) {
+      existing[column] = Number(existing[plusNumber[1]]) + Number(plusNumber[2]);
+      continue;
+    }
+    const plusExcluded = expression.match(
+      /^[a-zA-Z_][a-zA-Z0-9_]*\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\+\s*excluded\.([a-zA-Z_][a-zA-Z0-9_]*)$/,
+    );
+    if (plusExcluded) {
+      existing[column] =
+        Number(existing[plusExcluded[1]]) + Number(incoming[plusExcluded[2]]);
+      continue;
+    }
+    existing[column] = toScalar(expression);
+  }
 };
 
 const stripQuotes = (value) =>
@@ -145,11 +176,19 @@ export function createFakeD1() {
   const runSql = (sql, bindings = []) => {
     const statement = sql.replace(/\s+/g, " ").trim();
 
-    let match = statement.match(
+    let    match = statement.match(
       /^CREATE TABLE IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s*\(.*\)$/i,
     );
     if (match) {
       rowsOf(match[1]);
+      return { success: true };
+    }
+
+    match = statement.match(
+      /^CREATE UNIQUE INDEX IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s+ON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]+)\)$/i,
+    );
+    if (match) {
+      rowsOf(match[2]);
       return { success: true };
     }
 
@@ -162,7 +201,14 @@ export function createFakeD1() {
         column.trim().replace(/`|"/g, ""),
       );
       const ignore = /INSERT OR IGNORE/i.test(statement);
-      const tupleTexts = [...match[3].matchAll(/\(([^)]*)\)/g)].map(
+      const upsertMatch = statement.match(
+        /ON CONFLICT\s*\(([^)]+)\)\s*DO UPDATE SET\s+(.+)$/i,
+      );
+      const conflictColumn = upsertMatch ? upsertMatch[1].trim() : null;
+      const valuesText = upsertMatch
+        ? match[3].slice(0, match[3].indexOf("ON CONFLICT"))
+        : match[3];
+      const tupleTexts = [...valuesText.matchAll(/\(([^)]*)\)/g)].map(
         (tuple) => tuple[1],
       );
       let bindIndex = 0;
@@ -177,10 +223,18 @@ export function createFakeD1() {
           const token = tokens[i];
           row[columns[i]] = token === "?" ? bindings[bindIndex++] : toScalar(token);
         }
-        const existing = rowsOf(tableName).find((candidate) =>
-          looseEq(candidate.id, row.id),
+        const existing = rowsOf(tableName).find(
+          (candidate) =>
+            looseEq(candidate.id, row.id) ||
+            (conflictColumn && looseEq(candidate[conflictColumn], row[conflictColumn])),
         );
         if (existing && ignore) continue;
+        if (existing && conflictColumn) {
+          // Upsert: apply the DO UPDATE SET assignments to the matched row.
+          applyUpsertSet(existing, row, upsertMatch[2]);
+          inserted += 1;
+          continue;
+        }
         rowsOf(tableName).push(row);
         inserted += 1;
       }
@@ -292,12 +346,25 @@ export function createFakeD1() {
 
       let setIndex = 0;
       const evaluate = (expression, row) => {
-        if (expression === "?") return setBindValues[setIndex++];
-        const decrement = expression.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*-\s*\?$/);
+        const trimmed = expression.trim();
+        if (trimmed === "?") return setBindValues[setIndex++];
+        const decrement = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*-\s*\?$/);
         if (decrement) return Number(row[decrement[1]]) - setBindValues[setIndex++];
-        const increment = expression.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*\+\s*\?$/);
+        const increment = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*\+\s*\?$/);
         if (increment) return Number(row[increment[1]]) + setBindValues[setIndex++];
-        return toScalar(expression);
+        const decrementLiteral = trimmed.match(
+          /^([a-zA-Z_][a-zA-Z0-9_]*)\s*-\s*(-?\d+(\.\d+)?)$/,
+        );
+        if (decrementLiteral) {
+          return Number(row[decrementLiteral[1]]) - Number(decrementLiteral[2]);
+        }
+        const incrementLiteral = trimmed.match(
+          /^([a-zA-Z_][a-zA-Z0-9_]*)\s*\+\s*(-?\d+(\.\d+)?)$/,
+        );
+        if (incrementLiteral) {
+          return Number(row[incrementLiteral[1]]) + Number(incrementLiteral[2]);
+        }
+        return toScalar(trimmed);
       };
 
       const store = rowsOf(tableName);
