@@ -1,8 +1,4 @@
-import {
-  createProduct,
-  deleteProduct,
-  listProducts,
-} from "../lib/products-db.js";
+import { createProduct, listProducts } from "../lib/products-db.js";
 
 export async function onRequest({ request, env }) {
   if (request.method === "GET") {

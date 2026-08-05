@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS sizes (
   name TEXT NOT NULL
 );
 
+INSERT OR IGNORE INTO sizes (id, name) VALUES
+  ('size-xs', 'XS'),
+  ('size-s', 'S'),
+  ('size-m', 'M'),
+  ('size-l', 'L'),
+  ('size-xl', 'XL');
+
 CREATE TABLE IF NOT EXISTS inventory (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL,

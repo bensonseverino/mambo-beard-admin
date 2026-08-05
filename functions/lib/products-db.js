@@ -1,3 +1,5 @@
+import { ensureSchema } from "./schema.js";
+
 const slugifyValue = (value) =>
   String(value || "")
     .toLowerCase()
@@ -82,68 +84,6 @@ export const normalizeProductPayload = (product) => {
   };
 };
 
-const createSchemaStatements = (db) => [
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS products (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      slug TEXT NOT NULL,
-      description TEXT,
-      price REAL NOT NULL,
-      category TEXT,
-      featured INTEGER NOT NULL DEFAULT 0,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `),
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS product_colors (
-      id TEXT PRIMARY KEY,
-      product_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      hex TEXT NOT NULL,
-      sort_order INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-    )
-  `),
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS product_images (
-      id TEXT PRIMARY KEY,
-      product_id TEXT NOT NULL,
-      color_id TEXT NOT NULL,
-      path TEXT NOT NULL,
-      type TEXT NOT NULL,
-      file_name TEXT NOT NULL,
-      size INTEGER NOT NULL DEFAULT 0,
-      uploaded_at TEXT NOT NULL,
-      is_primary INTEGER NOT NULL DEFAULT 0,
-      sort_order INTEGER NOT NULL DEFAULT 1,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-      FOREIGN KEY (color_id) REFERENCES product_colors(id) ON DELETE CASCADE
-    )
-  `),
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS product_variants (
-      id TEXT PRIMARY KEY,
-      product_id TEXT NOT NULL,
-      color_id TEXT NOT NULL,
-      size TEXT NOT NULL,
-      stock INTEGER NOT NULL DEFAULT 0,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-      FOREIGN KEY (color_id) REFERENCES product_colors(id) ON DELETE CASCADE
-    )
-  `),
-];
-
-export const ensureProductSchema = async (env) => {
-  if (!env?.DB) return;
-  const statements = createSchemaStatements(env.DB);
-  await env.DB.batch(statements);
-};
-
 const mapImageRow = (row) => ({
   id: row.id,
   path: row.path,
@@ -167,7 +107,7 @@ const mapColorRow = (row, images, variants) => ({
 
 export const listProducts = async (env) => {
   if (!env?.DB) return [];
-  await ensureProductSchema(env);
+  await ensureSchema(env);
 
   const [productsResult, colorsResult, imagesResult, variantsResult] =
     await Promise.all([
@@ -299,11 +239,16 @@ const insertVariantStatement = (db, productId, colorId, variant) =>
 
 export const createProduct = async (env, payload) => {
   if (!env?.DB) return normalizeProductPayload(payload);
-  await ensureProductSchema(env);
+  await ensureSchema(env);
   const normalized = normalizeProductPayload(payload);
   const now = new Date().toISOString();
   const product = { ...normalized, createdAt: now, updatedAt: now };
   const statements = [insertProductStatement(env.DB, product)];
+
+  const sizeRows = await env.DB.prepare("SELECT id, name FROM sizes").all();
+  const sizeIds = new Map(
+    (sizeRows.results || []).map((row) => [row.name, row.id]),
+  );
 
   for (const color of product.colors) {
     statements.push(insertColorStatement(env.DB, product.id, color, now));
@@ -315,6 +260,33 @@ export const createProduct = async (env, payload) => {
     for (const variant of color.variants || []) {
       statements.push(
         insertVariantStatement(env.DB, product.id, color.id, variant),
+      );
+
+      let sizeId = sizeIds.get(variant.size);
+      if (!sizeId) {
+        sizeId = `size-${slugifyValue(variant.size)}`;
+        statements.push(
+          env.DB
+            .prepare(
+              "INSERT OR IGNORE INTO sizes (id, name) VALUES (?, ?)",
+            )
+            .bind(sizeId, variant.size),
+        );
+        sizeIds.set(variant.size, sizeId);
+      }
+      statements.push(
+        env.DB
+          .prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            `${color.id}__${sizeId}`,
+            product.id,
+            color.id,
+            sizeId,
+            variant.stock,
+          ),
       );
     }
   }
@@ -334,10 +306,13 @@ export const createProduct = async (env, payload) => {
 
 export const updateProduct = async (env, productId, payload) => {
   if (!env?.DB) return normalizeProductPayload({ ...payload, id: productId });
-  await ensureProductSchema(env);
+  await ensureSchema(env);
   const normalized = normalizeProductPayload({ ...payload, id: productId });
   const now = new Date().toISOString();
   const statements = [
+    env.DB.prepare("DELETE FROM inventory WHERE product_id = ?").bind(
+      productId,
+    ),
     env.DB.prepare("DELETE FROM product_variants WHERE product_id = ?").bind(
       productId,
     ),
@@ -355,8 +330,11 @@ export const updateProduct = async (env, productId, payload) => {
 
 export const deleteProduct = async (env, productId) => {
   if (!env?.DB) return true;
-  await ensureProductSchema(env);
+  await ensureSchema(env);
   const statements = [
+    env.DB.prepare("DELETE FROM inventory WHERE product_id = ?").bind(
+      productId,
+    ),
     env.DB.prepare("DELETE FROM product_variants WHERE product_id = ?").bind(
       productId,
     ),
@@ -371,3 +349,116 @@ export const deleteProduct = async (env, productId) => {
   await env.DB.batch(statements);
   return true;
 };
+
+/**
+ * Load a single product by id OR slug with colors, images, and inventory.
+ * Returns null when not found.
+ */
+export const getProductDetail = async (env, key) => {
+  if (!env?.DB) return null;
+  await ensureSchema(env);
+
+  const product = await env.DB
+    .prepare("SELECT * FROM products WHERE id = ? OR slug = ?")
+    .bind(key, key)
+    .first();
+  if (!product) return null;
+
+  const [colorsResult, imagesResult, variantsResult, inventoryResult] =
+    await Promise.all([
+      env.DB.prepare(
+        "SELECT * FROM product_colors WHERE product_id = ? ORDER BY sort_order ASC, created_at DESC",
+      )
+        .bind(product.id)
+        .all(),
+      env.DB.prepare(
+        "SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC, uploaded_at DESC",
+      )
+        .bind(product.id)
+        .all(),
+      env.DB.prepare(
+        "SELECT * FROM product_variants WHERE product_id = ? ORDER BY size ASC",
+      )
+        .bind(product.id)
+        .all(),
+      env.DB.prepare(
+        "SELECT * FROM inventory WHERE product_id = ?",
+      )
+        .bind(product.id)
+        .all(),
+    ]);
+
+  const images = (imagesResult.results || []).map(mapImageRow);
+  const imagesByColor = new Map();
+  for (const image of images) {
+    const existing = imagesByColor.get(image.colorId) || [];
+    existing.push(image);
+    imagesByColor.set(image.colorId, existing);
+  }
+
+  const variantsByColor = new Map();
+  for (const variant of variantsResult.results || []) {
+    const existing = variantsByColor.get(variant.color_id) || [];
+    existing.push({ size: variant.size, stock: variant.stock });
+    variantsByColor.set(variant.color_id, existing);
+  }
+
+  const sizeNamesById = new Map();
+  const inventory = (inventoryResult.results || []).map((row) => {
+    sizeNamesById.set(row.size_id, "");
+    return {
+      id: row.id,
+      productId: row.product_id,
+      colorId: row.color_id,
+      sizeId: row.size_id,
+      stock: row.stock,
+    };
+  });
+
+  if (sizeNamesById.size) {
+    const sizeRows = await env.DB
+      .prepare(
+        `SELECT id, name FROM sizes WHERE id IN (${[...sizeNamesById.keys()]
+          .map(() => "?")
+          .join(",")})`,
+      )
+      .bind(...sizeNamesById.keys())
+      .all();
+    for (const row of sizeRows.results || []) {
+      sizeNamesById.set(row.id, row.name);
+    }
+    for (const entry of inventory) {
+      entry.size = sizeNamesById.get(entry.sizeId) || entry.sizeId;
+    }
+  }
+
+  const colors = (colorsResult.results || []).map((color) =>
+    mapColorRow(
+      color,
+      imagesByColor.get(color.id) || [],
+      variantsByColor.get(color.id) || [],
+    ),
+  );
+
+  const thumbnail =
+    images.find((image) => image.isPrimary)?.previewUrl || images[0]?.previewUrl || "";
+
+  return {
+    product: {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      description: product.description,
+      price: product.price,
+      category: product.category,
+      featured: Boolean(product.featured),
+      active: Boolean(product.active),
+    },
+    colors,
+    images,
+    inventory,
+    thumbnail,
+  };
+};
+
+

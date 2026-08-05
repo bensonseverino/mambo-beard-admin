@@ -1,7 +1,15 @@
-export async function onRequest({ request }) {
+import { listOrders } from "../lib/orders-db.js";
+import { errorResponse } from "../lib/schema.js";
+
+export async function onRequest({ request, env }) {
   if (request.method === "GET") {
-    return Response.json({ success: true, data: [] });
+    try {
+      const orders = await listOrders(env);
+      return Response.json({ success: true, data: orders });
+    } catch (error) {
+      return errorResponse(error);
+    }
   }
 
-  return new Response("Method not allowed", { status: 405 });
+  return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
 }
