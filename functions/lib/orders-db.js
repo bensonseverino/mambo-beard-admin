@@ -314,7 +314,7 @@ export const createOrder = async (env, payload) => {
   };
 };
 
-const mapOrderRow = (order, itemsByOrder) => ({
+const mapOrderRow = (order, itemsByOrder, productNames, colorInfos) => ({
   id: order.id,
   orderNumber: order.order_number,
   customerName: order.customer_name,
@@ -326,45 +326,126 @@ const mapOrderRow = (order, itemsByOrder) => ({
   total: order.total,
   status: order.status,
   createdAt: order.created_at,
-  items: itemsByOrder.get(order.id) || [],
+  items: (itemsByOrder.get(order.id) || []).map((item) => ({
+    id: item.id,
+    productId: item.product_id,
+    productName: productNames.get(item.product_id) || "Unknown product",
+    colorId: item.color_id,
+    colorName: colorInfos.get(item.color_id)?.name || "",
+    colorHex: colorInfos.get(item.color_id)?.hex || "",
+    size: item.size,
+    sizeId: item.size_id,
+    quantity: item.quantity,
+    price: item.price,
+  })),
 });
 
-export const listOrders = async (env) => {
+/**
+ * List orders with server-side pagination and filters.
+ *
+ * options: { page, pageSize, search, status, date }
+ *   search — matches order number, customer name, phone, email, or status
+ *   status — exact status match
+ *   date   — matches orders created on a given YYYY-MM-DD day
+ *
+ * Returns { orders, total, page, pageSize, totalPages }. Each order embeds
+ * its items enriched with product and color names for admin display.
+ */
+export const listOrders = async (env, options = {}) => {
   requireDb(env);
   await ensureSchema(env);
 
-  const [ordersResult, itemsResult] = await Promise.all([
-    env.DB.prepare("SELECT * FROM orders ORDER BY created_at DESC").all(),
-    env.DB.prepare("SELECT * FROM order_items").all(),
-  ]);
+  const page = Math.max(1, toInt(options.page, 1));
+  const pageSize = Math.min(100, Math.max(1, toInt(options.pageSize, 10)));
+  const search = String(options.search || "").trim();
+  const status = String(options.status || "").trim();
+  const date = String(options.date || "").trim();
+
+  const conditions = [];
+  const bindings = [];
+  if (search) {
+    conditions.push(
+      "(order_number LIKE ? OR customer_name LIKE ? OR phone LIKE ? OR email LIKE ? OR status LIKE ?)",
+    );
+    const pattern = `%${search}%`;
+    bindings.push(pattern, pattern, pattern, pattern, pattern);
+  }
+  if (status) {
+    conditions.push("status = ?");
+    bindings.push(status);
+  }
+  if (date) {
+    conditions.push("created_at LIKE ?");
+    bindings.push(`${date}%`);
+  }
+  const whereClause = conditions.length
+    ? ` WHERE ${conditions.join(" AND ")}`
+    : "";
+
+  const [countResult, ordersResult, itemsResult, productsResult, colorsResult] =
+    await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM orders${whereClause}`)
+        .bind(...bindings)
+        .all(),
+      env.DB.prepare(
+        `SELECT * FROM orders${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+        .bind(...bindings, pageSize, (page - 1) * pageSize)
+        .all(),
+      env.DB.prepare("SELECT * FROM order_items").all(),
+      env.DB.prepare("SELECT id, name FROM products").all(),
+      env.DB.prepare("SELECT id, name, hex FROM product_colors").all(),
+    ]);
+
+  const productNames = new Map(
+    (productsResult.results || []).map((row) => [row.id, row.name]),
+  );
+  const colorInfos = new Map(
+    (colorsResult.results || []).map((row) => [row.id, row]),
+  );
 
   const itemsByOrder = new Map();
   for (const row of itemsResult.results || []) {
     const existing = itemsByOrder.get(row.order_id) || [];
-    existing.push({
-      id: row.id,
-      productId: row.product_id,
-      colorId: row.color_id,
-      size: row.size,
-      sizeId: row.size_id,
-      quantity: row.quantity,
-      price: row.price,
-    });
+    existing.push(row);
     itemsByOrder.set(row.order_id, existing);
   }
 
-  return (ordersResult.results || []).map((order) =>
-    mapOrderRow(order, itemsByOrder),
-  );
+  const total = toInt(countResult.results?.[0]?.count);
+  return {
+    orders: (ordersResult.results || []).map((order) =>
+      mapOrderRow(order, itemsByOrder, productNames, colorInfos),
+    ),
+    total,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
 };
+
+const ORDER_STATUSES = [
+  "pending",
+  "confirmed",
+  "packing",
+  "shipped",
+  "delivered",
+  "cancelled",
+];
 
 export const updateOrderStatus = async (env, orderId, payload) => {
   requireDb(env);
   await ensureSchema(env);
 
-  const status = String(payload?.status || "").trim();
+  const status = String(payload?.status || "").trim().toLowerCase();
   if (!status) {
     throw apiError("INVALID_STATUS", "Order status is required.");
+  }
+  if (!ORDER_STATUSES.includes(status)) {
+    throw apiError(
+      "INVALID_STATUS",
+      `Invalid order status: "${status}".`,
+      400,
+    );
   }
 
   const result = await env.DB.prepare(

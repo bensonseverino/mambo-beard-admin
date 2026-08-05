@@ -4,8 +4,15 @@ import { errorResponse } from "../lib/schema.js";
 export async function onRequest({ request, env }) {
   if (request.method === "GET") {
     try {
-      const orders = await listOrders(env);
-      return Response.json({ success: true, data: orders });
+      const url = new URL(request.url);
+      const result = await listOrders(env, {
+        page: url.searchParams.get("page"),
+        pageSize: url.searchParams.get("pageSize"),
+        search: url.searchParams.get("search") || "",
+        status: url.searchParams.get("status") || "",
+        date: url.searchParams.get("date") || "",
+      });
+      return Response.json({ success: true, data: result });
     } catch (error) {
       return errorResponse(error);
     }

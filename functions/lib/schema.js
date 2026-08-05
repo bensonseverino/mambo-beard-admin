@@ -90,8 +90,10 @@ export const SCHEMA_STATEMENTS = [
     quantity INTEGER NOT NULL,
     price INTEGER NOT NULL,
     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
-    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
-    FOREIGN KEY(color_id) REFERENCES product_colors(id) ON DELETE CASCADE,
+    -- No ON DELETE CASCADE on product_id/color_id: products are soft-deleted
+    -- (active = 0) so order history must survive deletes and edits.
+    FOREIGN KEY(product_id) REFERENCES products(id),
+    FOREIGN KEY(color_id) REFERENCES product_colors(id),
     FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE
   )`,
   `CREATE TABLE IF NOT EXISTS customers (

@@ -245,15 +245,24 @@ export function createFakeD1() {
     }
 
     match = statement.match(
-      /^SELECT (.+?) FROM ([a-zA-Z_][a-zA-Z0-9_]*)(?: WHERE (.+?))?(?: ORDER BY (.+?))?(?: LIMIT (\d+))?$/i,
+      /^SELECT (.+?) FROM ([a-zA-Z_][a-zA-Z0-9_]*)(?: WHERE (.+?))?(?: ORDER BY (.+?))?(?: LIMIT (\d+|\?)(?: OFFSET (\d+|\?))?)?$/i,
     );
     if (match) {
-      const [, selectList, tableName, whereClause, orderByClause, limitText] =
-        match;
+      const [
+        ,
+        selectList,
+        tableName,
+        whereClause,
+        orderByClause,
+        limitText,
+        offsetText,
+      ] = match;
       let bindIndex = 0;
       let predicate = { matches: () => true };
       if (whereClause) {
-        predicate = parseConditions(whereClause, bindings, bindIndex);
+        const parsed = parseConditions(whereClause, bindings, bindIndex);
+        predicate = parsed;
+        bindIndex = parsed.bindIndex;
       }
 
       let matched = rowsOf(tableName).filter((row) => predicate.matches(row));
@@ -271,7 +280,16 @@ export function createFakeD1() {
         });
       }
 
-      const limit = limitText ? Number(limitText) : null;
+      let limit = null;
+      if (limitText) {
+        limit = limitText === "?" ? Number(bindings[bindIndex++]) : Number(limitText);
+      }
+      let offset = 0;
+      if (offsetText) {
+        // OFFSET is always the last bind value, so a plain read is enough.
+        offset = offsetText === "?" ? Number(bindings[bindIndex]) : Number(offsetText);
+      }
+      if (offset) matched = matched.slice(offset);
       if (limit) matched = matched.slice(0, limit);
 
       // Aggregate select (COUNT / SUM).

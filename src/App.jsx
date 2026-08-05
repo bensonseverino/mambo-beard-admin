@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BrowserRouter,
+  Link,
   Navigate,
   NavLink,
   Route,
@@ -13,11 +14,86 @@ const navItems = [
   { to: "/", label: "Dashboard" },
   { to: "/products", label: "Products" },
   { to: "/orders", label: "Orders" },
+  { to: "/customers", label: "Customers" },
   { to: "/inventory", label: "Inventory" },
   { to: "/collections", label: "Collections" },
-  { to: "/customers", label: "Customers" },
   { to: "/settings", label: "Settings" },
 ];
+
+const ORDER_STATUSES = [
+  "pending",
+  "confirmed",
+  "packing",
+  "shipped",
+  "delivered",
+  "cancelled",
+];
+
+const STATUS_STYLES = {
+  pending: "bg-amber-500/15 text-amber-300",
+  confirmed: "bg-sky-500/15 text-sky-300",
+  packing: "bg-violet-500/15 text-violet-300",
+  shipped: "bg-blue-500/15 text-blue-300",
+  delivered: "bg-emerald-500/15 text-emerald-300",
+  cancelled: "bg-rose-500/15 text-rose-300",
+};
+
+const statusLabel = (status) =>
+  status ? String(status).charAt(0).toUpperCase() + String(status).slice(1) : "—";
+
+const statusStyle = (status) =>
+  STATUS_STYLES[String(status || "").toLowerCase()] ||
+  "bg-slate-500/15 text-slate-300";
+
+// SQLite CURRENT_TIMESTAMP stores UTC as "YYYY-MM-DD HH:MM:SS"; parse it as
+// UTC so displayed times convert correctly to the admin's local timezone.
+const parseDbDate = (value) => {
+  if (!value) return null;
+  const text = String(value);
+  const date = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)
+    ? new Date(`${text.replace(" ", "T")}Z`)
+    : new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatDate = (value) => {
+  const date = parseDbDate(value);
+  if (!date) return value ? String(value) : "—";
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
+const formatDay = (value) => {
+  const date = parseDbDate(value);
+  if (!date) return value ? String(value) : "—";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+};
+
+const apiFetch = async (path, options = {}) => {
+  const token = localStorage.getItem("mambo-admin-token") || "";
+  const headers = { ...(options.headers || {}) };
+  headers.Authorization = `Bearer ${token}`;
+  if (options.body) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, { ...options, headers });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      payload.message || payload.error || `Request failed (${response.status})`,
+    );
+  }
+  return payload;
+};
+
+const REFRESH_INTERVAL_MS = 45000;
 
 const sizeOptions = ["XS", "S", "M", "L", "XL"];
 
@@ -80,32 +156,7 @@ const createSeedState = () => ({
       ],
     },
   ],
-  orders: [
-    {
-      id: "ord-101",
-      customer: "Alicia Brooks",
-      status: "Processing",
-      total: 118.5,
-      date: "2026-08-01",
-      items: 2,
-    },
-    {
-      id: "ord-102",
-      customer: "Marcus Bell",
-      status: "Pending",
-      total: 64,
-      date: "2026-08-02",
-      items: 1,
-    },
-    {
-      id: "ord-103",
-      customer: "Lina Santos",
-      status: "Shipped",
-      total: 142,
-      date: "2026-08-03",
-      items: 3,
-    },
-  ],
+  orders: [],
   collections: [
     {
       id: "col-1",
@@ -124,24 +175,7 @@ const createSeedState = () => ({
       productIds: ["prod-2"],
     },
   ],
-  customers: [
-    {
-      id: "cus-1",
-      name: "Alicia Brooks",
-      phone: "+1 555 0178",
-      email: "alicia@example.com",
-      totalOrders: 4,
-      lifetimeSpend: 289,
-    },
-    {
-      id: "cus-2",
-      name: "Marcus Bell",
-      phone: "+1 555 0141",
-      email: "marcus@example.com",
-      totalOrders: 2,
-      lifetimeSpend: 128,
-    },
-  ],
+  customers: [],
   settings: {
     whatsapp: "+1 555 0199",
     deliveryZones: ["Downtown", "North Loop", "Riverside"],
@@ -163,7 +197,6 @@ const formatCurrency = (value) =>
   }).format(value);
 
 const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png"];
-const maxImageSizeBytes = 20 * 1024 * 1024;
 const imageTypeOptions = [
   "front",
   "back",
@@ -397,7 +430,9 @@ function ProtectedApp() {
     const loadProducts = async () => {
       try {
         const token = localStorage.getItem("mambo-admin-token") || "";
-        const response = await fetch("/api/products", {
+        // includeInactive=1 lets the admin see and restore soft-deleted
+        // products; the storefront catalog still only gets active ones.
+        const response = await fetch("/api/products?includeInactive=1", {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -487,31 +522,20 @@ function ProtectedApp() {
             </div>
           </div>
           <Routes>
-            <Route path="/" element={<DashboardView state={state} />} />
+            <Route path="/" element={<DashboardView />} />
             <Route
               path="/products"
               element={<ProductsView state={state} updateState={updateState} isLoadingProducts={isLoadingProducts} />}
             />
-            <Route
-              path="/orders"
-              element={<OrdersView state={state} updateState={updateState} />}
-            />
-            <Route
-              path="/inventory"
-              element={
-                <InventoryView state={state} updateState={updateState} />
-              }
-            />
+            <Route path="/orders" element={<OrdersView />} />
+            <Route path="/inventory" element={<InventoryView />} />
             <Route
               path="/collections"
               element={
                 <CollectionsView state={state} updateState={updateState} />
               }
             />
-            <Route
-              path="/customers"
-              element={<CustomersView state={state} />}
-            />
+            <Route path="/customers" element={<CustomersView />} />
             <Route
               path="/settings"
               element={<SettingsView state={state} updateState={updateState} />}
@@ -523,100 +547,203 @@ function ProtectedApp() {
   );
 }
 
-function DashboardView({ state }) {
-  const stats = useMemo(() => {
-    const revenueToday = state.orders.reduce(
-      (sum, order) => sum + order.total,
-      0,
-    );
-    const totalOrders = state.orders.length;
-    const lowStock = state.products.flatMap((product) =>
-      product.colors.flatMap((color) =>
-        color.variants
-          .filter((variant) => variant.stock <= 2)
-          .map((variant) => ({
-            productName: product.name,
-            size: variant.size,
-            stock: variant.stock,
-          })),
-      ),
-    );
+function DashboardView() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const requestSeq = useRef(0);
 
-    return {
-      revenueToday: formatCurrency(revenueToday),
-      revenueMonth: formatCurrency(revenueToday * 5),
-      totalOrders,
-      lowStock,
-    };
-  }, [state]);
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const payload = await apiFetch("/api/dashboard");
+      if (requestSeq.current !== seq) return;
+      setData(payload.data);
+      setError("");
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(err.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.setTimeout(() => void load(), 0);
+    const id = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  const metrics = [
+    {
+      label: "Today's orders",
+      value: data ? data.todayOrders : "—",
+      hint: "Orders placed today",
+    },
+    {
+      label: "Today's revenue",
+      value: data ? formatCurrency(data.todayRevenue) : "—",
+      hint: "Revenue since midnight",
+    },
+    {
+      label: "Total customers",
+      value: data ? data.totalCustomers : "—",
+      hint: "Registered on checkout",
+    },
+    {
+      label: "Pending orders",
+      value: data ? data.pendingOrders : "—",
+      hint: "Awaiting confirmation",
+    },
+    {
+      label: "Low stock products",
+      value: data ? data.lowStockCount : "—",
+      hint: "2 or fewer units left",
+    },
+  ];
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Revenue today" value={stats.revenueToday} />
-        <MetricCard label="Revenue this month" value={stats.revenueMonth} />
-        <MetricCard label="Total orders" value={stats.totalOrders} />
-        <MetricCard label="Low-stock alerts" value={stats.lowStock.length} />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-slate-400">
+          {error ? (
+            <span className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-rose-300">
+              {error}
+            </span>
+          ) : (
+            <>
+              Auto-refreshes every 45 seconds
+              {lastUpdated ? (
+                <span className="ml-2 text-slate-500">
+                  • Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              ) : null}
+            </>
+          )}
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            setRefreshing(true);
+            void load();
+          }}
+          className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/5"
+        >
+          <span className={refreshing ? "animate-spin" : ""}>⟳</span>
+          Refresh
+        </button>
       </div>
-      <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
-        <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-white">
-                Recent orders
-              </h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Today’s most recent purchasing activity.
-              </p>
-            </div>
-          </div>
-          <div className="mt-6 space-y-3">
-            {state.orders.map((order) => (
-              <div
-                key={order.id}
-                className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3"
-              >
-                <div>
-                  <p className="font-medium text-white">{order.customer}</p>
-                  <p className="text-sm text-slate-400">
-                    {order.id} • {order.date}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="font-semibold text-white">
-                    {formatCurrency(order.total)}
-                  </p>
-                  <p className="text-sm text-amber-300">{order.status}</p>
-                </div>
-              </div>
+
+      {loading && !data ? (
+        <p className="text-sm text-slate-400">Loading dashboard metrics…</p>
+      ) : (
+        <>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+            {metrics.map((metric) => (
+              <MetricCard
+                key={metric.label}
+                label={metric.label}
+                value={metric.value}
+                hint={metric.hint}
+              />
             ))}
           </div>
-        </section>
-        <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
-          <h2 className="text-xl font-semibold text-white">
-            Low-stock products
-          </h2>
-          <div className="mt-6 space-y-3">
-            {stats.lowStock.length ? (
-              stats.lowStock.map((item, index) => (
-                <div
-                  key={`${item.productName}-${index}`}
-                  className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3"
-                >
-                  <p className="font-medium text-white">{item.productName}</p>
-                  <p className="text-sm text-slate-300">
-                    Size {item.size} • {item.stock} units left
+
+          <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
+            <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">
+                    Recent orders
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-400">
+                    The latest purchases from your storefront.
                   </p>
                 </div>
-              ))
-            ) : (
-              <p className="text-sm text-slate-400">
-                Everything looks well stocked.
-              </p>
-            )}
+                <Link
+                  to="/orders"
+                  className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5"
+                >
+                  View all
+                </Link>
+              </div>
+              <div className="mt-6 space-y-3">
+                {data?.recentOrders?.length ? (
+                  data.recentOrders.map((order) => (
+                    <div
+                      key={order.id}
+                      className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 transition hover:border-amber-400/30"
+                    >
+                      <div>
+                        <p className="font-medium text-white">
+                          {order.customerName || "—"}
+                        </p>
+                        <p className="text-sm text-slate-400">
+                          {order.orderNumber || order.id} •{" "}
+                          {formatDay(order.createdAt)}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-semibold text-white">
+                          {formatCurrency(order.total)}
+                        </p>
+                        <p className={`text-sm ${statusStyle(order.status)}`}>
+                          {statusLabel(order.status)}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-400">
+                    No orders yet — they will appear here automatically after
+                    checkout.
+                  </p>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-white">
+                  Low-stock products
+                </h2>
+                <Link
+                  to="/inventory"
+                  className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5"
+                >
+                  Manage
+                </Link>
+              </div>
+              <div className="mt-6 space-y-3">
+                {data?.lowStockProducts?.length ? (
+                  data.lowStockProducts.map((item) => (
+                    <div
+                      key={item.inventoryId}
+                      className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3"
+                    >
+                      <p className="font-medium text-white">
+                        {item.productName}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-300">
+                        {item.colorName ? `${item.colorName} • ` : ""}
+                        Size {item.size} • {item.stock} units left
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-400">
+                    Everything looks well stocked.
+                  </p>
+                )}
+              </div>
+            </section>
           </div>
-        </section>
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -634,7 +761,6 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     colors: [],
   });
   const [uploadQueues, setUploadQueues] = useState({});
-  const [draggedImageId, setDraggedImageId] = useState(null);
 
   const validationMessages = useMemo(
     () => getProductValidation(draft),
@@ -717,14 +843,43 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         throw new Error(payload.error || "Unable to delete product");
       }
 
+      // Soft delete: the product stays in the admin list, marked inactive,
+      // so order history and inventory are preserved.
       updateState((current) => ({
         ...current,
-        products: current.products.filter(
-          (product) => product.id !== productId,
+        products: current.products.map((product) =>
+          product.id === productId ? { ...product, active: false } : product,
         ),
       }));
     } catch (error) {
       console.error("Unable to delete product", error);
+    }
+  };
+
+  const restoreProduct = async (productId) => {
+    try {
+      const token = localStorage.getItem("mambo-admin-token") || "";
+      const response = await fetch(`/api/products/${productId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ active: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || "Unable to restore product");
+      }
+
+      updateState((current) => ({
+        ...current,
+        products: current.products.map((product) =>
+          product.id === productId ? { ...product, active: true } : product,
+        ),
+      }));
+    } catch (error) {
+      console.error("Unable to restore product", error);
     }
   };
 
@@ -963,29 +1118,6 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     }));
   };
 
-  const reorderImages = (colorId, fromId, toId) => {
-    setDraft((current) => ({
-      ...current,
-      colors: current.colors.map((color) => {
-        if (color.id !== colorId) return color;
-        const nextImages = normalizeColorImages(color.images);
-        const fromIndex = nextImages.findIndex((image) => image.id === fromId);
-        const toIndex = nextImages.findIndex((image) => image.id === toId);
-        if (fromIndex < 0 || toIndex < 0) return color;
-        const reordered = [...nextImages];
-        const [moved] = reordered.splice(fromIndex, 1);
-        reordered.splice(toIndex, 0, moved);
-        return {
-          ...color,
-          images: reordered.map((image, index) => ({
-            ...image,
-            sortOrder: index + 1,
-          })),
-        };
-      }),
-    }));
-  };
-
   const replaceImage = async (colorId, currentImage, file) => {
     const color = draft.colors.find((item) => item.id === colorId);
     if (!color) return;
@@ -1137,7 +1269,6 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             </div>
             <div className="mt-4 space-y-4">
               {draft.colors.map((color, index) => {
-                const colorImages = normalizeColorImages(color.images);
                 return (
                   <div
                     key={color.id}
@@ -1589,6 +1720,15 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                       >
                         Edit
                       </button>
+                      {!product.active ? (
+                        <button
+                          type="button"
+                          className="rounded-full border border-emerald-500/30 px-3 py-1.5 text-xs text-emerald-300"
+                          onClick={() => restoreProduct(product.id)}
+                        >
+                          Restore
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="rounded-full border border-rose-500/20 px-3 py-1.5 text-xs text-rose-300"
@@ -1608,125 +1748,341 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   );
 }
 
-function InventoryView({ state, updateState }) {
-  const updateVariant = (productId, colorId, size, nextStock) => {
-    updateState((current) => ({
-      ...current,
-      products: current.products.map((product) => {
-        if (product.id !== productId) {
-          return product;
-        }
-        return {
-          ...product,
-          colors: product.colors.map((color) => {
-            if (color.id !== colorId) {
-              return color;
-            }
-            return {
-              ...color,
-              variants: color.variants.map((variant) =>
-                variant.size === size
-                  ? { ...variant, stock: Number(nextStock) }
-                  : variant,
-              ),
-            };
-          }),
-        };
-      }),
-    }));
+function InventoryView() {
+  const [inventory, setInventory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [savingId, setSavingId] = useState(null);
+  const [notice, setNotice] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const requestSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const payload = await apiFetch("/api/inventory");
+      if (requestSeq.current !== seq) return;
+      setInventory(payload.data || []);
+      setError("");
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.setTimeout(() => void load(), 0);
+    const id = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  const updateStock = async (rowId, nextStock) => {
+    // Invalidate any in-flight refresh so it cannot overwrite the save.
+    requestSeq.current += 1;
+    const stock = Math.max(0, Number(nextStock) || 0);
+    setInventory((current) =>
+      current.map((group) => ({
+        ...group,
+        colors: group.colors.map((color) => ({
+          ...color,
+          rows: color.rows.map((row) =>
+            row.id === rowId ? { ...row, stock } : row,
+          ),
+        })),
+      })),
+    );
+    setSavingId(rowId);
+    try {
+      await apiFetch(`/api/inventory/${rowId}`, {
+        method: "PUT",
+        body: JSON.stringify({ stock }),
+      });
+      setNotice("Stock updated.");
+      window.setTimeout(() => setNotice(""), 2500);
+    } catch (err) {
+      setError(err.message);
+      void load();
+    } finally {
+      setSavingId(null);
+    }
   };
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <p className="text-sm text-slate-400">
+          {error ? (
+            <span className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-rose-300">
+              {error}
+            </span>
+          ) : (
+            <>
+              Stock by product, color, and size • auto-refresh every 45s
+              {lastUpdated ? (
+                <span className="ml-2 text-slate-500">
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              ) : null}
+            </>
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {notice ? (
+            <span className="rounded-full bg-emerald-500/15 px-3 py-1.5 text-sm text-emerald-300">
+              {notice}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/5"
+          >
+            ⟳ Refresh
+          </button>
+        </div>
+      </div>
+
       <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
         <h2 className="text-xl font-semibold text-white">Inventory matrix</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Track stock by product, color, and size.
+          Track stock by product, color, and size. Changes save automatically.
         </p>
-        <div className="mt-6 grid gap-4">
-          {state.products.map((product) => (
-            <div
-              key={product.id}
-              className="rounded-2xl border border-white/10 bg-slate-950/70 p-4"
-            >
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="font-semibold text-white">{product.name}</p>
-                  <p className="text-sm text-slate-400">{product.category}</p>
+        {loading ? (
+          <p className="mt-6 text-sm text-slate-400">Loading inventory…</p>
+        ) : inventory.length === 0 ? (
+          <p className="mt-6 text-sm text-slate-400">
+            No inventory rows yet. Create products with variants to populate
+            stock.
+          </p>
+        ) : (
+          <div className="mt-6 grid gap-4">
+            {inventory.map((group) => (
+              <div
+                key={group.productId}
+                className="rounded-2xl border border-white/10 bg-slate-950/70 p-4"
+              >
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="font-semibold text-white">
+                      {group.productName}
+                    </p>
+                    <p className="text-sm text-slate-400">
+                      {group.category || "—"}
+                    </p>
+                  </div>
                 </div>
-              </div>
-              <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                {product.colors.map((color) => (
-                  <div
-                    key={color.id}
-                    className="rounded-2xl border border-white/10 bg-slate-900/70 p-3"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span
-                        className="h-3.5 w-3.5 rounded-full"
-                        style={{ backgroundColor: color.hex }}
-                      />
-                      <div>
-                        <p className="font-medium text-white">{color.name}</p>
-                        <p className="text-xs text-slate-500">
-                          {normalizeColorImages(color.images).length} image(s)
+                <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                  {group.colors.map((color) => (
+                    <div
+                      key={color.colorId}
+                      className="rounded-2xl border border-white/10 bg-slate-900/70 p-3"
+                    >
+                      <div className="flex items-center gap-3">
+                        <span
+                          className="h-3.5 w-3.5 rounded-full"
+                          style={{ backgroundColor: color.hex }}
+                        />
+                        <p className="font-medium text-white">
+                          {color.colorName}
                         </p>
                       </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        {color.rows.map((row) => (
+                          <label
+                            key={row.id}
+                            className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-300"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span>Size {row.size}</span>
+                              {savingId === row.id ? (
+                                <span className="text-xs text-amber-300">
+                                  Saving…
+                                </span>
+                              ) : row.stock <= 2 ? (
+                                <span className="text-xs font-medium text-amber-300">
+                                  Low stock
+                                </span>
+                              ) : (
+                                <span
+                                  className={`text-xs ${row.stock === 0 ? "text-rose-300" : "text-emerald-300"}`}
+                                >
+                                  {row.stock === 0
+                                    ? "Unavailable"
+                                    : "In stock"}
+                                </span>
+                              )}
+                            </div>
+                            <StockInput
+                              key={`${row.id}-${row.stock}`}
+                              row={row}
+                              onSave={updateStock}
+                            />
+                          </label>
+                        ))}
+                      </div>
                     </div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      {color.variants.map((variant) => (
-                        <label
-                          key={`${color.id}-${variant.size}`}
-                          className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-300"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span>{variant.size}</span>
-                            <span
-                              className={`text-xs ${variant.stock === 0 ? "text-rose-300" : "text-emerald-300"}`}
-                            >
-                              {variant.stock === 0 ? "Unavailable" : "In stock"}
-                            </span>
-                          </div>
-                          <input
-                            type="number"
-                            min="0"
-                            value={variant.stock}
-                            onChange={(event) =>
-                              updateVariant(
-                                product.id,
-                                color.id,
-                                variant.size,
-                                event.target.value,
-                              )
-                            }
-                            className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-2 py-2 text-sm text-white"
-                          />
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
 }
 
-function OrdersView({ state, updateState }) {
-  const updateStatus = (orderId, nextStatus) => {
-    updateState((current) => ({
-      ...current,
-      orders: current.orders.map((order) =>
-        order.id === orderId ? { ...order, status: nextStatus } : order,
-      ),
-    }));
+function StockInput({ row, onSave }) {
+  const [value, setValue] = useState(row.stock);
+
+  const commit = () => {
+    const next = Math.max(0, Number(value) || 0);
+    if (next !== row.stock) {
+      onSave(row.id, next);
+    } else {
+      setValue(row.stock);
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      min="0"
+      value={value}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.target.blur();
+      }}
+      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-2 py-2 text-sm text-white outline-none focus:border-amber-500/50"
+    />
+  );
+}
+
+function OrdersView() {
+  const [orders, setOrders] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [updatingId, setUpdatingId] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [notice, setNotice] = useState("");
+  const requestSeq = useRef(0);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (search) params.set("search", search);
+      if (statusFilter) params.set("status", statusFilter);
+      if (dateFilter) params.set("date", dateFilter);
+      const payload = await apiFetch(`/api/orders?${params.toString()}`);
+      if (requestSeq.current !== seq) return;
+      setOrders(payload.data?.orders || []);
+      setTotal(payload.data?.total || 0);
+      setError("");
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, search, statusFilter, dateFilter]);
+
+  useEffect(() => {
+    window.setTimeout(() => void load(), 0);
+    const id = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      setPage(1);
+      setSearch(searchInput.trim());
+    }, 350);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
+
+  const changeStatus = async (orderId, nextStatus) => {
+    // Invalidate any in-flight list refresh so it cannot overwrite the save.
+    requestSeq.current += 1;
+    setUpdatingId(orderId);
+    try {
+      const payload = await apiFetch(`/api/orders/${orderId}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const saved = payload.data;
+      setOrders((current) =>
+        current.map((order) =>
+          order.id === orderId ? { ...order, status: saved.status } : order,
+        ),
+      );
+      setSelected((current) =>
+        current && current.id === orderId
+          ? { ...current, status: saved.status }
+          : current,
+      );
+      setNotice("Order status saved.");
+      window.setTimeout(() => setNotice(""), 2500);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <p className="text-sm text-slate-400">
+          {error ? (
+            <span className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-rose-300">
+              {error}
+            </span>
+          ) : (
+            <>
+              {total} order(s) • auto-refresh every 45s
+              {lastUpdated ? (
+                <span className="ml-2 text-slate-500">
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              ) : null}
+            </>
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {notice ? (
+            <span className="rounded-full bg-emerald-500/15 px-3 py-1.5 text-sm text-emerald-300">
+              {notice}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/5"
+          >
+            ⟳ Refresh
+          </button>
+        </div>
+      </div>
+
       <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -1736,53 +2092,338 @@ function OrdersView({ state, updateState }) {
             </p>
           </div>
         </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Search order number, customer, phone, email…"
+            className="rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-2.5 text-sm text-white outline-none placeholder:text-slate-500"
+          />
+          <select
+            value={statusFilter}
+            onChange={(event) => {
+              setStatusFilter(event.target.value);
+              setPage(1);
+            }}
+            className="rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-2.5 text-sm text-white"
+          >
+            <option value="">All statuses</option>
+            {ORDER_STATUSES.map((status) => (
+              <option key={status} value={status}>
+                {statusLabel(status)}
+              </option>
+            ))}
+          </select>
+          <input
+            type="date"
+            value={dateFilter}
+            onChange={(event) => {
+              setDateFilter(event.target.value);
+              setPage(1);
+            }}
+            className="rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-2.5 text-sm text-white"
+          />
+        </div>
         <div className="mt-6 overflow-x-auto">
           <table className="min-w-full text-left text-sm text-slate-300">
             <thead className="text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-3 py-3">Order</th>
                 <th className="px-3 py-3">Customer</th>
+                <th className="px-3 py-3">Phone</th>
                 <th className="px-3 py-3">Status</th>
                 <th className="px-3 py-3">Total</th>
                 <th className="px-3 py-3">Date</th>
               </tr>
             </thead>
             <tbody>
-              {state.orders.map((order) => (
-                <tr key={order.id} className="border-t border-white/10">
-                  <td className="px-3 py-3 font-semibold text-white">
-                    {order.id}
+              {loading ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={6}
+                  >
+                    Loading orders…
                   </td>
-                  <td className="px-3 py-3">{order.customer}</td>
+                </tr>
+              ) : orders.length === 0 ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={6}
+                  >
+                    No orders match your filters.
+                  </td>
+                </tr>
+              ) : (
+                orders.map((order) => (
+                <tr
+                  key={order.id}
+                  className="cursor-pointer border-t border-white/10 transition hover:bg-white/5"
+                  onClick={() => setSelected(order)}
+                >
+                  <td className="px-3 py-3 font-semibold text-white">
+                    {order.orderNumber || order.id}
+                  </td>
+                  <td className="px-3 py-3">
+                    <p className="font-medium text-slate-100">
+                      {order.customerName || "—"}
+                    </p>
+                    {order.email ? (
+                      <p className="text-xs text-slate-500">{order.email}</p>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3">{order.phone || "—"}</td>
                   <td className="px-3 py-3">
                     <select
-                      value={order.status}
+                      value={order.status || ""}
+                      disabled={updatingId === order.id}
+                      onClick={(event) => event.stopPropagation()}
                       onChange={(event) =>
-                        updateStatus(order.id, event.target.value)
+                        changeStatus(order.id, event.target.value)
                       }
-                      className="rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-2 text-sm text-white"
+                      className={`rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-2 text-sm ${statusStyle(order.status)}`}
                     >
-                      {[
-                        "Pending",
-                        "Processing",
-                        "Shipped",
-                        "Delivered",
-                        "Cancelled",
-                      ].map((status) => (
+                      {ORDER_STATUSES.map((status) => (
                         <option key={status} value={status}>
-                          {status}
+                          {statusLabel(status)}
                         </option>
                       ))}
                     </select>
                   </td>
-                  <td className="px-3 py-3">{formatCurrency(order.total)}</td>
-                  <td className="px-3 py-3">{order.date}</td>
+                  <td className="px-3 py-3 font-medium text-white">
+                    {formatCurrency(order.total)}
+                  </td>
+                  <td className="px-3 py-3">{formatDate(order.createdAt)}</td>
                 </tr>
-              ))}
+              ))
+              )}
             </tbody>
           </table>
         </div>
+
+        <div className="mt-4 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-4 sm:flex-row">
+          <p className="text-sm text-slate-400">
+            Page {page} of {totalPages} • {total} order(s)
+          </p>
+          <div className="flex items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
+              }}
+              className="rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-1.5 text-sm text-white"
+            >
+              {[10, 25, 50].map((size) => (
+                <option key={size} value={size}>
+                  {size} per page
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() =>
+                setPage((current) => Math.min(totalPages, current + 1))
+              }
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </section>
+
+      {selected ? (
+        <OrderDetailDrawer
+          order={selected}
+          updatingId={updatingId}
+          onClose={() => setSelected(null)}
+          onChangeStatus={changeStatus}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function OrderDetailDrawer({ order, updatingId, onChangeStatus, onClose }) {
+  const lineTotal = (item) => (item.price || 0) * (item.quantity || 0);
+  return (
+    <div className="fixed inset-0 z-50">
+      <div
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <aside className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-white/10 bg-slate-900 shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-white/10 p-6">
+          <div>
+            <p className="text-sm font-medium uppercase tracking-[0.2em] text-amber-400">
+              Order {order.orderNumber || order.id}
+            </p>
+            <p className="mt-1 text-sm text-slate-400">
+              Placed {formatDate(order.createdAt)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-6 p-6">
+          <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <div>
+              <p className="text-sm text-slate-400">Status</p>
+              <p className="mt-1 text-lg font-semibold text-white">
+                {statusLabel(order.status)}
+              </p>
+            </div>
+            <select
+              value={order.status || ""}
+              disabled={updatingId === order.id}
+              onChange={(event) => onChangeStatus(order.id, event.target.value)}
+              className="rounded-xl border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-white"
+            >
+              {ORDER_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {statusLabel(status)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <section>
+            <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-slate-400">
+              Customer details
+            </h3>
+            <div className="mt-3 space-y-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-sm">
+              <p className="font-medium text-white">
+                {order.customerName || "—"}
+              </p>
+              <p className="text-slate-300">
+                {order.phone ? (
+                  <a
+                    href={`tel:${order.phone}`}
+                    className="text-amber-300 hover:underline"
+                  >
+                    {order.phone}
+                  </a>
+                ) : (
+                  "—"
+                )}
+              </p>
+              <p className="text-slate-300">
+                {order.email ? (
+                  <a
+                    href={`mailto:${order.email}`}
+                    className="text-amber-300 hover:underline"
+                  >
+                    {order.email}
+                  </a>
+                ) : (
+                  "—"
+                )}
+              </p>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-slate-400">
+              Shipping location
+            </h3>
+            <p className="mt-3 rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-sm text-slate-200">
+              {order.location || "No delivery location recorded."}
+            </p>
+          </section>
+
+          <section>
+            <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-slate-400">
+              Products ({order.items?.length || 0})
+            </h3>
+            <div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/70">
+              <table className="min-w-full text-left text-sm text-slate-300">
+                <thead className="bg-slate-900/80 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2.5">Product</th>
+                    <th className="px-3 py-2.5">Color</th>
+                    <th className="px-3 py-2.5">Size</th>
+                    <th className="px-3 py-2.5 text-right">Qty</th>
+                    <th className="px-3 py-2.5 text-right">Line total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {order.items?.length ? (
+                    order.items.map((item) => (
+                      <tr key={item.id} className="border-t border-white/10">
+                        <td className="px-3 py-2.5 font-medium text-white">
+                          {item.productName}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className="inline-flex items-center gap-2">
+                            {item.colorHex ? (
+                              <span
+                                className="h-3 w-3 rounded-full"
+                                style={{ backgroundColor: item.colorHex }}
+                              />
+                            ) : null}
+                            {item.colorName || "—"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5">{item.size || "—"}</td>
+                        <td className="px-3 py-2.5 text-right">
+                          {item.quantity}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-medium text-white">
+                          {formatCurrency(lineTotal(item))}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-3 py-4 text-center text-slate-500"
+                      >
+                        No items recorded.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between text-slate-300">
+                <span>Subtotal</span>
+                <span>{formatCurrency(order.subtotal || 0)}</span>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Delivery</span>
+                <span>{formatCurrency(order.deliveryFee || 0)}</span>
+              </div>
+              <div className="flex justify-between border-t border-white/10 pt-2 text-base font-semibold text-white">
+                <span>Total</span>
+                <span>{formatCurrency(order.total || 0)}</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
     </div>
   );
 }
@@ -1935,14 +2576,119 @@ function CollectionsView({ state, updateState }) {
   );
 }
 
-function CustomersView({ state }) {
+function CustomersView() {
+  const [customers, setCustomers] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const requestSeq = useRef(0);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (search) params.set("search", search);
+      const payload = await apiFetch(`/api/customers?${params.toString()}`);
+      if (requestSeq.current !== seq) return;
+      setCustomers(payload.data?.customers || []);
+      setTotal(payload.data?.total || 0);
+      setError("");
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, search]);
+
+  useEffect(() => {
+    window.setTimeout(() => void load(), 0);
+    const id = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      setPage(1);
+      setSearch(searchInput.trim());
+    }, 350);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
+
+  const openCustomer = async (customer) => {
+    setSelected(customer);
+    setDetail(null);
+    setDetailLoading(true);
+    try {
+      const payload = await apiFetch(`/api/customers/${customer.id}`);
+      setDetail(payload.data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
-        <h2 className="text-xl font-semibold text-white">Customers</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Track supporters, purchasing history, and lifetime spend.
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <p className="text-sm text-slate-400">
+          {error ? (
+            <span className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-rose-300">
+              {error}
+            </span>
+          ) : (
+            <>
+              {total} customer(s) • auto-refresh every 45s
+              {lastUpdated ? (
+                <span className="ml-2 text-slate-500">
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              ) : null}
+            </>
+          )}
         </p>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/5"
+        >
+          ⟳ Refresh
+        </button>
+      </div>
+
+      <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Customers</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Track supporters, purchasing history, and lifetime spend.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4">
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Search name, phone, or email…"
+            className="w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-2.5 text-sm text-white outline-none placeholder:text-slate-500"
+          />
+        </div>
         <div className="mt-6 overflow-x-auto">
           <table className="min-w-full text-left text-sm text-slate-300">
             <thead className="text-xs uppercase text-slate-500">
@@ -1952,26 +2698,259 @@ function CustomersView({ state }) {
                 <th className="px-3 py-3">Email</th>
                 <th className="px-3 py-3">Orders</th>
                 <th className="px-3 py-3">Lifetime spend</th>
+                <th className="px-3 py-3">Last order</th>
               </tr>
             </thead>
             <tbody>
-              {state.customers.map((customer) => (
-                <tr key={customer.id} className="border-t border-white/10">
-                  <td className="px-3 py-3 font-semibold text-white">
-                    {customer.name}
-                  </td>
-                  <td className="px-3 py-3">{customer.phone}</td>
-                  <td className="px-3 py-3">{customer.email}</td>
-                  <td className="px-3 py-3">{customer.totalOrders}</td>
-                  <td className="px-3 py-3">
-                    {formatCurrency(customer.lifetimeSpend)}
+              {loading ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={6}
+                  >
+                    Loading customers…
                   </td>
                 </tr>
-              ))}
+              ) : customers.length === 0 ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={6}
+                  >
+                    No customers match your search.
+                  </td>
+                </tr>
+              ) : (
+                customers.map((customer) => (
+                <tr
+                  key={customer.id}
+                  className="cursor-pointer border-t border-white/10 transition hover:bg-white/5"
+                  onClick={() => void openCustomer(customer)}
+                >
+                  <td className="px-3 py-3 font-semibold text-white">
+                    {customer.name || "—"}
+                  </td>
+                  <td className="px-3 py-3">{customer.phone || "—"}</td>
+                  <td className="px-3 py-3">{customer.email || "—"}</td>
+                  <td className="px-3 py-3">{customer.totalOrders}</td>
+                  <td className="px-3 py-3 font-medium text-white">
+                    {formatCurrency(customer.lifetimeSpend)}
+                  </td>
+                  <td className="px-3 py-3">
+                    {formatDay(customer.lastOrderAt)}
+                  </td>
+                </tr>
+              ))
+              )}
             </tbody>
           </table>
         </div>
+
+        <div className="mt-4 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-4 sm:flex-row">
+          <p className="text-sm text-slate-400">
+            Page {page} of {totalPages} • {total} customer(s)
+          </p>
+          <div className="flex items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
+              }}
+              className="rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-1.5 text-sm text-white"
+            >
+              {[10, 25, 50].map((size) => (
+                <option key={size} value={size}>
+                  {size} per page
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() =>
+                setPage((current) => Math.min(totalPages, current + 1))
+              }
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </section>
+
+      {selected ? (
+        <CustomerDetailDrawer
+          customer={selected}
+          detail={detail}
+          loading={detailLoading}
+          onClose={() => setSelected(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function CustomerDetailDrawer({ customer, detail, loading, onClose }) {
+  const stats = detail?.stats;
+  return (
+    <div className="fixed inset-0 z-50">
+      <div
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <aside className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-white/10 bg-slate-900 shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-white/10 p-6">
+          <div>
+            <p className="text-sm font-medium uppercase tracking-[0.2em] text-amber-400">
+              Customer
+            </p>
+            <h2 className="mt-1 text-2xl font-semibold text-white">
+              {customer.name || "—"}
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              {customer.phone || "—"}
+              {customer.email ? ` • ${customer.email}` : ""}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-6 p-6">
+          {loading ? (
+            <p className="text-sm text-slate-400">
+              Loading customer details…
+            </p>
+          ) : detail ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <MetricCard
+                  label="Total spend"
+                  value={formatCurrency(stats?.totalSpend || 0)}
+                />
+                <MetricCard
+                  label="Average order"
+                  value={formatCurrency(stats?.averageOrderValue || 0)}
+                />
+                <MetricCard
+                  label="Orders"
+                  value={stats?.orderCount || 0}
+                />
+              </div>
+
+              <section>
+                <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-slate-400">
+                  Order history
+                </h3>
+                <div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/70">
+                  <table className="min-w-full text-left text-sm text-slate-300">
+                    <thead className="bg-slate-900/80 text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2.5">Order</th>
+                        <th className="px-3 py-2.5">Date</th>
+                        <th className="px-3 py-2.5">Total</th>
+                        <th className="px-3 py-2.5">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.orders.length ? (
+                        detail.orders.map((order) => (
+                          <tr
+                            key={order.id}
+                            className="border-t border-white/10"
+                          >
+                            <td className="px-3 py-2.5 font-medium text-white">
+                              {order.orderNumber || order.id}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {formatDay(order.createdAt)}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {formatCurrency(order.total)}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <span
+                                className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(order.status)}`}
+                              >
+                                {statusLabel(order.status)}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="px-3 py-4 text-center text-slate-500"
+                          >
+                            No orders yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-slate-400">
+                  Recent purchases
+                </h3>
+                <div className="mt-3 space-y-2">
+                  {detail.recentPurchases.length ? (
+                    detail.recentPurchases.map((item) => (
+                      <div
+                        key={item.productId}
+                        className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3"
+                      >
+                        <div>
+                          <p className="font-medium text-white">
+                            {item.productName}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {item.colorName ? `${item.colorName} • ` : ""}
+                            Size {item.size || "—"} • Qty {item.quantity}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-medium text-white">
+                            {formatCurrency(item.price)}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {formatDay(item.purchasedAt)}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-400">
+                      No purchases recorded.
+                    </p>
+                  )}
+                </div>
+              </section>
+            </>
+          ) : (
+            <p className="text-sm text-slate-400">
+              Could not load customer details.
+            </p>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }
@@ -2071,11 +3050,12 @@ function SettingsView({ state, updateState }) {
   );
 }
 
-function MetricCard({ label, value }) {
+function MetricCard({ label, value, hint }) {
   return (
     <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-5">
       <p className="text-sm font-medium text-slate-400">{label}</p>
       <p className="mt-3 text-3xl font-semibold text-white">{value}</p>
+      {hint ? <p className="mt-2 text-xs text-slate-500">{hint}</p> : null}
     </div>
   );
 }

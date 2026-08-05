@@ -2,7 +2,10 @@ import { createProduct, listProducts } from "../lib/products-db.js";
 
 export async function onRequest({ request, env }) {
   if (request.method === "GET") {
-    const products = await listProducts(env);
+    const url = new URL(request.url);
+    const products = await listProducts(env, {
+      includeInactive: url.searchParams.get("includeInactive") === "1",
+    });
     return Response.json({ success: true, data: products });
   }
 

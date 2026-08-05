@@ -1,4 +1,4 @@
-import { ensureSchema } from "./schema.js";
+import { apiError, ensureSchema } from "./schema.js";
 
 const slugifyValue = (value) =>
   String(value || "")
@@ -105,13 +105,19 @@ const mapColorRow = (row, images, variants) => ({
   variants,
 });
 
-export const listProducts = async (env) => {
+export const listProducts = async (env, options = {}) => {
   if (!env?.DB) return [];
   await ensureSchema(env);
 
+  // The storefront catalog only sees active products; the admin passes
+  // includeInactive to see soft-deleted products and restore them.
+  const activeClause = options.includeInactive ? "" : " WHERE active = 1";
+
   const [productsResult, colorsResult, imagesResult, variantsResult] =
     await Promise.all([
-      env.DB.prepare("SELECT * FROM products ORDER BY created_at DESC").all(),
+      env.DB.prepare(
+        `SELECT * FROM products${activeClause} ORDER BY created_at DESC`,
+      ).all(),
       env.DB.prepare(
         "SELECT * FROM product_colors ORDER BY sort_order ASC, created_at DESC",
       ).all(),
@@ -307,6 +313,24 @@ export const createProduct = async (env, payload) => {
 export const updateProduct = async (env, productId, payload) => {
   if (!env?.DB) return normalizeProductPayload({ ...payload, id: productId });
   await ensureSchema(env);
+
+  // Partial updates that only touch the active flag (e.g. restore from a
+  // soft delete) update the flag directly instead of rebuilding the product.
+  // The guard is strict: `active` must be the sole key in the payload so a
+  // full product update can never be misclassified.
+  const payloadKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
+  if (payloadKeys.length === 1 && payload.active !== undefined) {
+    const result = await env.DB.prepare(
+      "UPDATE products SET active = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(payload.active ? 1 : 0, new Date().toISOString(), productId)
+      .run();
+    if (!result?.meta?.changes) {
+      throw apiError("PRODUCT_NOT_FOUND", "Product not found.", 404);
+    }
+    return { id: productId, active: Boolean(payload.active) };
+  }
+
   const normalized = normalizeProductPayload({ ...payload, id: productId });
   const now = new Date().toISOString();
   const statements = [
@@ -331,22 +355,18 @@ export const updateProduct = async (env, productId, payload) => {
 export const deleteProduct = async (env, productId) => {
   if (!env?.DB) return true;
   await ensureSchema(env);
-  const statements = [
-    env.DB.prepare("DELETE FROM inventory WHERE product_id = ?").bind(
-      productId,
-    ),
-    env.DB.prepare("DELETE FROM product_variants WHERE product_id = ?").bind(
-      productId,
-    ),
-    env.DB.prepare("DELETE FROM product_images WHERE product_id = ?").bind(
-      productId,
-    ),
-    env.DB.prepare("DELETE FROM product_colors WHERE product_id = ?").bind(
-      productId,
-    ),
-    env.DB.prepare("DELETE FROM products WHERE id = ?").bind(productId),
-  ];
-  await env.DB.batch(statements);
+
+  // Soft delete: hide the product from the storefront and keep every row so
+  // order history, customer purchases, and inventory stay intact. A product
+  // can be restored later by setting active = 1.
+  const result = await env.DB.prepare(
+    "UPDATE products SET active = 0, updated_at = ? WHERE id = ?",
+  )
+    .bind(new Date().toISOString(), productId)
+    .run();
+  if (!result?.meta?.changes) {
+    throw apiError("PRODUCT_NOT_FOUND", "Product not found.", 404);
+  }
   return true;
 };
 
@@ -358,8 +378,9 @@ export const getProductDetail = async (env, key) => {
   if (!env?.DB) return null;
   await ensureSchema(env);
 
+  // Storefront-facing detail: soft-deleted products are not viewable.
   const product = await env.DB
-    .prepare("SELECT * FROM products WHERE id = ? OR slug = ?")
+    .prepare("SELECT * FROM products WHERE (id = ? OR slug = ?) AND active = 1")
     .bind(key, key)
     .first();
   if (!product) return null;
