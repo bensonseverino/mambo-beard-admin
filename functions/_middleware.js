@@ -12,6 +12,9 @@ const PUBLIC_ROUTES = [
   { prefix: "/api/products", method: "GET" },
   { prefix: "/api/media", method: "GET" },
   { prefix: "/api/checkout", method: "POST" },
+  // The VIP subscription popup posts phone numbers from the storefront.
+  // Admin list/export/delete stay Bearer-protected.
+  { prefix: "/api/subscribers", method: "POST" },
 ];
 
 const isPublic = (pathname, method) =>

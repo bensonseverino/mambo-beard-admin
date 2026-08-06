@@ -5,7 +5,8 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // Generated build artifacts — never lint these.
+  globalIgnores(['dist', '.wrangler']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

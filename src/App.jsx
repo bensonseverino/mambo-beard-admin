@@ -15,6 +15,7 @@ const navItems = [
   { to: "/products", label: "Products" },
   { to: "/orders", label: "Orders" },
   { to: "/customers", label: "Customers" },
+  { to: "/subscribers", label: "Subscribers" },
   { to: "/inventory", label: "Inventory" },
   { to: "/collections", label: "Collections" },
   { to: "/settings", label: "Settings" },
@@ -559,6 +560,7 @@ function ProtectedApp() {
               }
             />
             <Route path="/customers" element={<CustomersView />} />
+            <Route path="/subscribers" element={<SubscribersView />} />
             <Route
               path="/settings"
               element={<SettingsView state={state} updateState={updateState} />}
@@ -3461,6 +3463,304 @@ function CustomerDetailDrawer({ customer, detail, loading, onClose }) {
           )}
         </div>
       </aside>
+    </div>
+  );
+}
+
+function SubscribersView() {
+  const [subscribers, setSubscribers] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const requestSeq = useRef(0);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (search) params.set("search", search);
+      const payload = await apiFetch(`/api/subscribers?${params.toString()}`);
+      if (requestSeq.current !== seq) return;
+      setSubscribers(payload.data?.subscribers || []);
+      setTotal(payload.data?.total || 0);
+      setError("");
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, search]);
+
+  useEffect(() => {
+    window.setTimeout(() => void load(), 0);
+    const id = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [load]);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      setPage(1);
+      setSearch(searchInput.trim());
+    }, 350);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
+
+  const exportCsv = async () => {
+    try {
+      const token = localStorage.getItem("mambo-admin-token") || "";
+      const params = new URLSearchParams({ export: "csv" });
+      if (search) params.set("search", search);
+      const response = await fetch(`/api/subscribers?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error("Unable to export subscribers.");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "subscribers.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setNotice("Exported subscribers.csv.");
+      window.setTimeout(() => setNotice(""), 2500);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const deleteSubscriber = async (id) => {
+    // Invalidate any in-flight auto-refresh so a stale response fetched
+    // before the delete cannot re-add the removed subscriber.
+    requestSeq.current += 1;
+    setDeletingId(id);
+    try {
+      await apiFetch(`/api/subscribers/${id}`, { method: "DELETE" });
+      setSubscribers((current) => current.filter((row) => row.id !== id));
+      setTotal((current) => Math.max(0, current - 1));
+      setPendingDelete(null);
+      setNotice("Subscriber removed.");
+      window.setTimeout(() => setNotice(""), 2500);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <p className="text-sm text-slate-400">
+          {error ? (
+            <span className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-rose-300">
+              {error}
+            </span>
+          ) : (
+            <>
+              {total} VIP subscriber(s) • auto-refresh every 45s
+              {lastUpdated ? (
+                <span className="ml-2 text-slate-500">
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              ) : null}
+            </>
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {notice ? (
+            <span className="rounded-full bg-emerald-500/15 px-3 py-1.5 text-sm text-emerald-300">
+              {notice}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void exportCsv()}
+            className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 px-4 py-2 text-sm text-amber-300 transition hover:bg-amber-500/10"
+          >
+            ⭳ Export CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/5"
+          >
+            ⟳ Refresh
+          </button>
+        </div>
+      </div>
+
+      <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Subscribers</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Phone numbers collected by the storefront VIP popup. The popup is
+              rate-limited to 5 sign-ups per IP per hour.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4">
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Search phone number…"
+            className="w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-2.5 text-sm text-white outline-none placeholder:text-slate-500"
+          />
+        </div>
+        <div className="mt-6 overflow-x-auto">
+          <table className="min-w-full text-left text-sm text-slate-300">
+            <thead className="text-xs uppercase text-slate-500">
+              <tr>
+                <th className="px-3 py-3">Phone Number</th>
+                <th className="px-3 py-3">Date Joined</th>
+                <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3">Source</th>
+                <th className="px-3 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={5}
+                  >
+                    Loading subscribers…
+                  </td>
+                </tr>
+              ) : subscribers.length === 0 ? (
+                <tr>
+                  <td
+                    className="px-3 py-8 text-center text-slate-400"
+                    colSpan={5}
+                  >
+                    No subscribers match your search.
+                  </td>
+                </tr>
+              ) : (
+                subscribers.map((subscriber) => (
+                  <tr
+                    key={subscriber.id}
+                    className="border-t border-white/10 transition hover:bg-white/5"
+                  >
+                    <td className="px-3 py-3 font-mono font-medium text-white">
+                      {subscriber.phone}
+                    </td>
+                    <td className="px-3 py-3">
+                      {formatDate(subscriber.createdAt)}
+                    </td>
+                    <td className="px-3 py-3">
+                      <span
+                        className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                          String(subscriber.status || "active").toLowerCase() ===
+                          "active"
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-slate-500/15 text-slate-300"
+                        }`}
+                      >
+                        {statusLabel(subscriber.status || "active")}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 capitalize">
+                      {subscriber.source || "website"}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {pendingDelete === subscriber.id ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="text-xs text-rose-300">
+                            Remove forever?
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void deleteSubscriber(subscriber.id)}
+                            disabled={deletingId === subscriber.id}
+                            className="rounded-full bg-rose-500/20 px-3 py-1.5 text-sm font-medium text-rose-300 transition hover:bg-rose-500/30 disabled:opacity-50"
+                          >
+                            {deletingId === subscriber.id ? "…" : "Confirm"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDelete(null)}
+                            className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5"
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setPendingDelete(subscriber.id)}
+                          className="rounded-full border border-rose-500/20 px-3 py-1.5 text-sm text-rose-300 transition hover:bg-rose-500/10"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mt-4 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-4 sm:flex-row">
+          <p className="text-sm text-slate-400">
+            Page {page} of {totalPages} • {total} subscriber(s)
+          </p>
+          <div className="flex items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
+              }}
+              className="rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-1.5 text-sm text-white"
+            >
+              {[10, 25, 50].map((size) => (
+                <option key={size} value={size}>
+                  {size} per page
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() =>
+                setPage((current) => Math.min(totalPages, current + 1))
+              }
+              className="rounded-xl border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

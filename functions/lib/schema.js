@@ -120,6 +120,22 @@ export const SCHEMA_STATEMENTS = [
     name TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS subscribers (
+    id TEXT PRIMARY KEY,
+    phone TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'active',
+    source TEXT DEFAULT 'website'
+  )`,
+  // Rolling per-IP, per-hour counters for the subscription popup. The id IS
+  // the composite key `ip|YYYY-MM-DD-HH`, so PRIMARY KEY enforces uniqueness
+  // without needing a separate unique index in the runtime bootstrap.
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    id TEXT PRIMARY KEY,
+    ip TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0
+  )`,
 ];
 
 export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUES
