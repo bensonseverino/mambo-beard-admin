@@ -184,6 +184,69 @@ test("customer upsert merges on phone conflict instead of duplicating (race path
   assert.equal(rows[0].lifetime_spend, 372); // 198 + 174
 });
 
+const seedSimpleProduct = async (env, stock) => {
+  await createProduct(env, {
+    id: "prod-tote",
+    name: "Mambo Tote Bag",
+    slug: "mambo-tote-bag",
+    price: 12,
+    category: "Accessories",
+    productType: "simple",
+    stock,
+    gallery: [],
+  });
+};
+
+test("checkout supports simple products: no color/size, NULL order line, stock deducted", async () => {
+  const env = await makeEnv();
+  await seedSimpleProduct(env, 53);
+
+  const order = await createOrder(env, {
+    customer: { name: "Jane Doe", phone: "+254700000000" },
+    items: [{ productId: "prod-tote", quantity: 3 }],
+    deliveryFee: 0,
+  });
+
+  assert.equal(order.subtotal, 36); // 12 * 3
+  assert.equal(order.total, 36);
+  assert.equal(order.items[0].colorId, null);
+  assert.equal(order.items[0].size, "");
+
+  // Order line stored with NULL color_id / size_id / size.
+  const items = env.DB._rows("order_items");
+  assert.equal(items.length, 1);
+  assert.equal(items[0].product_id, "prod-tote");
+  assert.equal(items[0].color_id, null);
+  assert.equal(items[0].size_id, null);
+  assert.equal(items[0].size, null);
+  assert.equal(items[0].quantity, 3);
+
+  // The single stock row was deducted; no variant mirror exists.
+  assert.equal(env.DB._rows("product_variants").length, 0);
+  const inventory = env.DB._rows("inventory");
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].stock, 50);
+  assert.equal(inventory[0].color_id, null);
+  assert.equal(inventory[0].size_id, null);
+});
+
+test("checkout rejects simple product orders over the single stock figure", async () => {
+  const env = await makeEnv();
+  await seedSimpleProduct(env, 2);
+
+  await assert.rejects(
+    () =>
+      createOrder(env, {
+        customer: { name: "Jane Doe", phone: "+254700000000" },
+        items: [{ productId: "prod-tote", quantity: 5 }],
+      }),
+    (error) => error.code === "INSUFFICIENT_STOCK" && error.status === 400,
+  );
+
+  assert.equal(env.DB._rows("orders").length, 0);
+  assert.equal(env.DB._rows("inventory")[0].stock, 2);
+});
+
 test("insufficient stock rejects the order with a structured error and writes nothing", async () => {
   const env = await makeEnv();
   await seedProduct(env);
@@ -225,9 +288,16 @@ test("order numbers are sequential per day", async () => {
   const first = await generateOrderNumber(env, new Date("2026-08-05T12:00:00Z"));
   assert.equal(first, "MB-20260805-0001");
 
+  // createOrder stamps the order with today's date, so the second number is
+  // derived from the current day (the sequence restarts each day).
   await createOrder(env, basePayload());
-  const second = await generateOrderNumber(env, new Date("2026-08-05T13:00:00Z"));
-  assert.equal(second, "MB-20260805-0002");
+  const now = new Date();
+  const prefix = `MB-${now.getFullYear()}${String(now.getMonth() + 1).padStart(
+    2,
+    "0",
+  )}${String(now.getDate()).padStart(2, "0")}`;
+  const second = await generateOrderNumber(env, now);
+  assert.equal(second, `${prefix}-0002`);
 });
 
 test("listOrders returns orders with embedded items", async () => {

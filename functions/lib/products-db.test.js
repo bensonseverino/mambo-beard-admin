@@ -234,6 +234,194 @@ test("dashboard low-stock excludes soft-deleted products", async () => {
   assert.equal(payload.data.lowStockCount, 1);
 });
 
+test("simple products are created with a gallery and a single NULL/NULL inventory row", async () => {
+  const env = makeEnv();
+
+  const request = new Request("https://example.com/api/products", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Mambo Tote Bag",
+      slug: "mambo-tote-bag",
+      description: "Canvas tote",
+      price: 12,
+      category: "Accessories",
+      productType: "simple",
+      stock: 53,
+      gallery: [
+        {
+          id: "g-1",
+          path: "products/mambo-tote-bag/gallery/front.webp",
+          isPrimary: true,
+        },
+        { id: "g-2", path: "products/mambo-tote-bag/gallery/back.webp" },
+      ],
+    }),
+  });
+
+  const response = await productsHandler({ request, env });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.success, true);
+  assert.equal(payload.data.productType, "simple");
+  assert.equal(payload.data.stock, 53);
+  assert.equal(payload.data.gallery.length, 2);
+  assert.deepEqual(payload.data.colors, []);
+
+  // No colors, variants, or size rows are created; images and stock are
+  // stored with NULL color_id / size_id.
+  assert.equal(env.DB._rows("product_colors").length, 0);
+  assert.equal(env.DB._rows("product_variants").length, 0);
+  const images = env.DB._rows("product_images");
+  assert.equal(images.length, 2);
+  assert.equal(images[0].color_id, null);
+  const inventory = env.DB._rows("inventory");
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].color_id, null);
+  assert.equal(inventory[0].size_id, null);
+  assert.equal(inventory[0].stock, 53);
+});
+
+test("listProducts and getProductDetail expose product_type, gallery, and stock", async () => {
+  const env = makeEnv();
+  await createProduct(env, {
+    id: "prod-tote",
+    name: "Mambo Tote Bag",
+    slug: "mambo-tote-bag",
+    price: 12,
+    category: "Accessories",
+    productType: "simple",
+    stock: 7,
+    gallery: [
+      {
+        id: "g-1",
+        path: "products/mambo-tote-bag/gallery/front.webp",
+        isPrimary: true,
+      },
+    ],
+  });
+
+  const listed = await listProducts(env);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].productType, "simple");
+  assert.equal(listed[0].stock, 7);
+  assert.equal(listed[0].gallery.length, 1);
+  assert.deepEqual(listed[0].colors, []);
+
+  const detail = await getProductDetail(env, "prod-tote");
+  assert.equal(detail.product.productType, "simple");
+  assert.equal(detail.stock, 7);
+  assert.equal(detail.gallery.length, 1);
+  assert.equal(detail.inventory.length, 1);
+  assert.equal(detail.inventory[0].colorId, null);
+  assert.deepEqual(detail.colors, []);
+});
+
+test("updateProduct switches variant → simple without corrupting records", async () => {
+  const env = makeEnv();
+  await createProduct(env, {
+    id: "prod-1",
+    name: "Classic Beard Oil",
+    slug: "classic-beard-oil",
+    price: 24,
+    category: "Care",
+    colors: [
+      {
+        id: "color-1",
+        name: "Amber",
+        hex: "#b97a1b",
+        images: [],
+        variants: [{ size: "M", stock: 5 }],
+      },
+    ],
+  });
+
+  // A past order must survive the type switch (0002/0003 keep FKs safe).
+  await createOrder(env, {
+    customer: { name: "Jane Doe", phone: "+254700000000" },
+    items: [{ productId: "prod-1", colorId: "color-1", size: "M", quantity: 1 }],
+  });
+  assert.equal(env.DB._rows("order_items").length, 1);
+
+  await updateProduct(env, "prod-1", {
+    id: "prod-1",
+    name: "Classic Beard Oil",
+    slug: "classic-beard-oil",
+    price: 24,
+    category: "Care",
+    productType: "simple",
+    stock: 10,
+    gallery: [
+      {
+        id: "g-1",
+        path: "products/classic-beard-oil/gallery/front.webp",
+        isPrimary: true,
+      },
+    ],
+  });
+
+  // Variant structures are gone; the simple structures exist.
+  assert.equal(env.DB._rows("product_colors").length, 0);
+  assert.equal(env.DB._rows("product_variants").length, 0);
+  const inventory = env.DB._rows("inventory");
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].color_id, null);
+  assert.equal(inventory[0].size_id, null);
+  assert.equal(inventory[0].stock, 10);
+
+  // Order history survived the rebuild.
+  assert.equal(env.DB._rows("order_items").length, 1);
+  const listed = await listProducts(env);
+  assert.equal(listed[0].productType, "simple");
+  assert.equal(listed[0].stock, 10);
+});
+
+test("updateProduct switches simple → variant and rebuilds colors and inventory", async () => {
+  const env = makeEnv();
+  await createProduct(env, {
+    id: "prod-1",
+    name: "Classic Beard Oil",
+    slug: "classic-beard-oil",
+    price: 24,
+    category: "Care",
+    productType: "simple",
+    stock: 10,
+    gallery: [],
+  });
+  assert.equal(env.DB._rows("inventory").length, 1);
+
+  await updateProduct(env, "prod-1", {
+    id: "prod-1",
+    name: "Classic Beard Oil",
+    slug: "classic-beard-oil",
+    price: 24,
+    category: "Care",
+    productType: "variant",
+    colors: [
+      {
+        id: "color-1",
+        name: "Amber",
+        hex: "#b97a1b",
+        images: [],
+        variants: [{ size: "M", stock: 8 }],
+      },
+    ],
+  });
+
+  assert.equal(env.DB._rows("product_colors").length, 1);
+  assert.equal(env.DB._rows("product_variants").length, 1);
+  const inventory = env.DB._rows("inventory");
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].color_id, "color-1");
+  assert.equal(inventory[0].size_id, "size-m");
+  assert.equal(inventory[0].stock, 8);
+  const listed = await listProducts(env);
+  assert.equal(listed[0].productType, "variant");
+  assert.equal(listed[0].colors.length, 1);
+  assert.equal(listed[0].colors[0].variants[0].stock, 8);
+});
+
 test("products API lists created products with colors", async () => {
   const env = makeEnv();
   const createRequest = new Request("https://example.com/api/products", {

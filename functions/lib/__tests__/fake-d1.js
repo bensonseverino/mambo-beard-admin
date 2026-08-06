@@ -68,7 +68,10 @@ const stripQuotes = (value) =>
     : value;
 
 const toScalar = (value) => {
-  const stripped = stripQuotes(value.trim());
+  const trimmed = value.trim();
+  // Unquoted SQL NULL literal → real null (so IS NULL matches it).
+  if (/^NULL$/i.test(trimmed)) return null;
+  const stripped = stripQuotes(trimmed);
   if (/^-?\d+(\.\d+)?$/.test(stripped)) return Number(stripped);
   return stripped;
 };
@@ -90,6 +93,19 @@ const matchLike = (pattern, value) => {
 };
 
 const parseCondition = (condition, bindings, bindIndex) => {
+  // IS NULL / IS NOT NULL (used for simple-product stock rows and galleries).
+  const nullMatch = condition.match(
+    /^([a-zA-Z_][a-zA-Z0-9_]*)\s*(IS NULL|IS NOT NULL)$/i,
+  );
+  if (nullMatch) {
+    const [, column, operator] = nullMatch;
+    const matcher = (row) =>
+      operator.toUpperCase() === "IS NULL"
+        ? row[column] == null
+        : row[column] != null;
+    return { matcher, bindIndex };
+  }
+
   const match = condition.match(
     /^([a-zA-Z_][a-zA-Z0-9_]*)\s*(>=|<=|>|<|=|LIKE)\s*(\?|'[^']*'|-?\d+(\.\d+)?)$/i,
   );

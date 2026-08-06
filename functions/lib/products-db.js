@@ -13,63 +13,87 @@ const buildPreviewUrl = (path) =>
 const buildColorId = (index) => `color-${Date.now()}-${index}`;
 const buildImageId = (index) => `image-${Date.now()}-${index}`;
 
+const toInt = (value, fallback = 0) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : fallback;
+};
+
+/** Normalize an image entry into the canonical shape used everywhere. */
+const normalizeImages = (images) =>
+  (Array.isArray(images) ? images : []).map((image, index) => ({
+    id: image?.id || buildImageId(index),
+    path: String(image?.path || "").trim(),
+    type: String(image?.type || "gallery"),
+    fileName: String(
+      image?.fileName ||
+        image?.path?.split("/").pop() ||
+        `asset-${index + 1}`,
+    ),
+    size: Number(image?.size || 0),
+    uploadedAt: String(image?.uploadedAt || new Date().toISOString()),
+    isPrimary: Boolean(image?.isPrimary),
+    sortOrder: Number(image?.sortOrder || index + 1),
+  }));
+
 export const normalizeProductPayload = (product) => {
   const safeProduct = product || {};
+  const productType = safeProduct.productType === "simple" ? "simple" : "variant";
+
   const normalizedColors =
-    Array.isArray(safeProduct.colors) && safeProduct.colors.length
-      ? safeProduct.colors.map((color, index) => ({
-          id: color?.id || buildColorId(index),
-          name: String(color?.name || `Color ${index + 1}`).trim(),
-          hex: String(color?.hex || "#111827"),
-          sortOrder: Number(color?.sortOrder || index + 1),
-          images: Array.isArray(color?.images)
-            ? color.images.map((image, imageIndex) => ({
-                id: image?.id || buildImageId(imageIndex),
-                path: String(image?.path || "").trim(),
-                type: String(image?.type || "gallery"),
-                fileName: String(
-                  image?.fileName ||
-                    image?.path?.split("/").pop() ||
-                    `asset-${imageIndex + 1}`,
-                ),
-                size: Number(image?.size || 0),
-                uploadedAt: String(
-                  image?.uploadedAt || new Date().toISOString(),
-                ),
-                isPrimary: Boolean(image?.isPrimary),
-                sortOrder: Number(image?.sortOrder || imageIndex + 1),
-              }))
-            : [],
-          variants:
-            Array.isArray(color?.variants) && color.variants.length
-              ? color.variants.map((variant) => ({
-                  size: String(variant?.size || "M"),
-                  stock: Number(variant?.stock || 0),
-                }))
-              : [
-                  { size: "XS", stock: 0 },
-                  { size: "S", stock: 0 },
-                  { size: "M", stock: 0 },
-                  { size: "L", stock: 0 },
-                  { size: "XL", stock: 0 },
-                ],
-        }))
-      : [
-          {
-            id: buildColorId(0),
-            name: "Default",
-            hex: "#111827",
-            sortOrder: 1,
-            images: [],
-            variants: [
-              { size: "XS", stock: 0 },
-              { size: "S", stock: 0 },
-              { size: "M", stock: 0 },
-              { size: "L", stock: 0 },
-              { size: "XL", stock: 0 },
-            ],
-          },
-        ];
+    productType === "simple"
+      ? []
+      : Array.isArray(safeProduct.colors) && safeProduct.colors.length
+        ? safeProduct.colors.map((color, index) => ({
+            id: color?.id || buildColorId(index),
+            name: String(color?.name || `Color ${index + 1}`).trim(),
+            hex: String(color?.hex || "#111827"),
+            sortOrder: Number(color?.sortOrder || index + 1),
+            images: normalizeImages(color?.images),
+            variants:
+              Array.isArray(color?.variants) && color.variants.length
+                ? color.variants.map((variant) => ({
+                    size: String(variant?.size || "M"),
+                    stock: Number(variant?.stock || 0),
+                  }))
+                : [
+                    { size: "XS", stock: 0 },
+                    { size: "S", stock: 0 },
+                    { size: "M", stock: 0 },
+                    { size: "L", stock: 0 },
+                    { size: "XL", stock: 0 },
+                  ],
+          }))
+        : [
+            {
+              id: buildColorId(0),
+              name: "Default",
+              hex: "#111827",
+              sortOrder: 1,
+              images: [],
+              variants: [
+                { size: "XS", stock: 0 },
+                { size: "S", stock: 0 },
+                { size: "M", stock: 0 },
+                { size: "L", stock: 0 },
+                { size: "XL", stock: 0 },
+              ],
+            },
+          ];
+
+  // Simple products own a single color-less gallery and one stock figure.
+  // When switching variant → simple without a gallery in the payload, the
+  // existing per-color images are flattened into the gallery instead of
+  // being discarded.
+  const gallery =
+    productType === "simple"
+      ? normalizeImages(
+          Array.isArray(safeProduct.gallery) && safeProduct.gallery.length
+            ? safeProduct.gallery
+            : (safeProduct.colors || []).flatMap(
+                (color) => color.images || [],
+              ),
+        )
+      : [];
 
   return {
     id: String(safeProduct.id || `prod-${Date.now()}`),
@@ -80,12 +104,17 @@ export const normalizeProductPayload = (product) => {
     category: String(safeProduct.category || "Care").trim(),
     featured: Boolean(safeProduct.featured),
     active: safeProduct.active !== false,
+    productType,
+    stock: productType === "simple" ? Math.max(0, toInt(safeProduct.stock)) : null,
+    gallery,
     colors: normalizedColors,
   };
 };
 
 const mapImageRow = (row) => ({
   id: row.id,
+  productId: row.product_id,
+  colorId: row.color_id,
   path: row.path,
   previewUrl: buildPreviewUrl(row.path),
   type: row.type,
@@ -113,7 +142,7 @@ export const listProducts = async (env, options = {}) => {
   // includeInactive to see soft-deleted products and restore them.
   const activeClause = options.includeInactive ? "" : " WHERE active = 1";
 
-  const [productsResult, colorsResult, imagesResult, variantsResult] =
+  const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult] =
     await Promise.all([
       env.DB.prepare(
         `SELECT * FROM products${activeClause} ORDER BY created_at DESC`,
@@ -125,13 +154,33 @@ export const listProducts = async (env, options = {}) => {
         "SELECT * FROM product_images ORDER BY sort_order ASC, uploaded_at DESC",
       ).all(),
       env.DB.prepare("SELECT * FROM product_variants ORDER BY size ASC").all(),
+      env.DB.prepare(
+        "SELECT product_id, color_id, stock FROM inventory",
+      ).all(),
     ]);
 
   const imagesByColor = new Map();
+  const galleryByProduct = new Map();
   for (const image of imagesResult.results || []) {
+    const mapped = mapImageRow(image);
+    if (image.color_id == null) {
+      // Simple-product gallery image (not attached to any color).
+      const existing = galleryByProduct.get(image.product_id) || [];
+      existing.push(mapped);
+      galleryByProduct.set(image.product_id, existing);
+      continue;
+    }
     const existing = imagesByColor.get(image.color_id) || [];
-    existing.push(mapImageRow(image));
+    existing.push(mapped);
     imagesByColor.set(image.color_id, existing);
+  }
+
+  // Simple products have exactly one stock row (color_id/size_id NULL).
+  const stockByProduct = new Map();
+  for (const row of inventoryResult.results || []) {
+    if (row.color_id == null && !stockByProduct.has(row.product_id)) {
+      stockByProduct.set(row.product_id, toInt(row.stock));
+    }
   }
 
   const variantsByColor = new Map();
@@ -154,25 +203,31 @@ export const listProducts = async (env, options = {}) => {
     colorsByProduct.set(color.product_id, existing);
   }
 
-  return (productsResult.results || []).map((product) => ({
-    id: product.id,
-    name: product.name,
-    slug: product.slug,
-    description: product.description,
-    price: product.price,
-    category: product.category,
-    featured: Boolean(product.featured),
-    active: Boolean(product.active),
-    colors: colorsByProduct.get(product.id) || [],
-  }));
+  return (productsResult.results || []).map((product) => {
+    const isSimple = String(product.product_type || "variant") === "simple";
+    return {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      description: product.description,
+      price: product.price,
+      category: product.category,
+      featured: Boolean(product.featured),
+      active: Boolean(product.active),
+      productType: isSimple ? "simple" : "variant",
+      colors: isSimple ? [] : colorsByProduct.get(product.id) || [],
+      gallery: galleryByProduct.get(product.id) || [],
+      stock: isSimple ? (stockByProduct.get(product.id) ?? null) : null,
+    };
+  });
 };
 
 const insertProductStatement = (db, product) =>
   db
     .prepare(
       `
-    INSERT INTO products (id, name, slug, description, price, category, featured, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
     )
     .bind(
@@ -184,6 +239,7 @@ const insertProductStatement = (db, product) =>
       product.category,
       product.featured ? 1 : 0,
       product.active ? 1 : 0,
+      product.productType === "simple" ? "simple" : "variant",
       product.createdAt,
       product.updatedAt,
     );
@@ -249,6 +305,35 @@ export const createProduct = async (env, payload) => {
   const normalized = normalizeProductPayload(payload);
   const now = new Date().toISOString();
   const product = { ...normalized, createdAt: now, updatedAt: now };
+
+  // Simple products: one gallery (images with NULL color_id) and one
+  // inventory row (NULL color_id / NULL size_id). No colors, sizes, or
+  // variants are created.
+  if (product.productType === "simple") {
+    const statements = [insertProductStatement(env.DB, product)];
+    for (const image of product.gallery || []) {
+      statements.push(
+        insertImageStatement(env.DB, product.id, null, image, now),
+      );
+    }
+    statements.push(
+      env.DB
+        .prepare(
+          `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+           VALUES (?, ?, NULL, NULL, ?)`,
+        )
+        .bind(`stock-${product.id}`, product.id, product.stock),
+    );
+    await env.DB.batch(statements);
+    return {
+      ...product,
+      gallery: (product.gallery || []).map((image) => ({
+        ...image,
+        previewUrl: buildPreviewUrl(image.path),
+      })),
+    };
+  }
+
   const statements = [insertProductStatement(env.DB, product)];
 
   const sizeRows = await env.DB.prepare("SELECT id, name FROM sizes").all();
@@ -409,9 +494,16 @@ export const getProductDetail = async (env, key) => {
         .all(),
     ]);
 
+  const isSimple = String(product.product_type || "variant") === "simple";
+
   const images = (imagesResult.results || []).map(mapImageRow);
   const imagesByColor = new Map();
+  const galleryImages = [];
   for (const image of images) {
+    if (image.colorId == null) {
+      galleryImages.push(image);
+      continue; // gallery images belong to the product, not a color
+    }
     const existing = imagesByColor.get(image.colorId) || [];
     existing.push(image);
     imagesByColor.set(image.colorId, existing);
@@ -424,19 +516,21 @@ export const getProductDetail = async (env, key) => {
     variantsByColor.set(variant.color_id, existing);
   }
 
-  const sizeNamesById = new Map();
-  const inventory = (inventoryResult.results || []).map((row) => {
-    sizeNamesById.set(row.size_id, "");
-    return {
-      id: row.id,
-      productId: row.product_id,
-      colorId: row.color_id,
-      sizeId: row.size_id,
-      stock: row.stock,
-    };
-  });
+  const inventory = (inventoryResult.results || []).map((row) => ({
+    id: row.id,
+    productId: row.product_id,
+    colorId: row.color_id,
+    sizeId: row.size_id,
+    stock: row.stock,
+    size: null,
+  }));
 
-  if (sizeNamesById.size) {
+  // Resolve size names only for variant rows (simple rows have NULL size_id).
+  const rowsWithSize = inventory.filter((entry) => entry.sizeId != null);
+  if (rowsWithSize.length) {
+    const sizeNamesById = new Map(
+      rowsWithSize.map((entry) => [entry.sizeId, ""]),
+    );
     const sizeRows = await env.DB
       .prepare(
         `SELECT id, name FROM sizes WHERE id IN (${[...sizeNamesById.keys()]
@@ -448,18 +542,25 @@ export const getProductDetail = async (env, key) => {
     for (const row of sizeRows.results || []) {
       sizeNamesById.set(row.id, row.name);
     }
-    for (const entry of inventory) {
+    for (const entry of rowsWithSize) {
       entry.size = sizeNamesById.get(entry.sizeId) || entry.sizeId;
     }
   }
 
-  const colors = (colorsResult.results || []).map((color) =>
-    mapColorRow(
-      color,
-      imagesByColor.get(color.id) || [],
-      variantsByColor.get(color.id) || [],
-    ),
-  );
+  const colors = isSimple
+    ? []
+    : (colorsResult.results || []).map((color) =>
+        mapColorRow(
+          color,
+          imagesByColor.get(color.id) || [],
+          variantsByColor.get(color.id) || [],
+        ),
+      );
+
+  const gallery = isSimple ? galleryImages : [];
+  const stockRow = isSimple
+    ? inventory.find((entry) => entry.colorId == null && entry.sizeId == null)
+    : null;
 
   const thumbnail =
     images.find((image) => image.isPrimary)?.previewUrl || images[0]?.previewUrl || "";
@@ -474,9 +575,12 @@ export const getProductDetail = async (env, key) => {
       category: product.category,
       featured: Boolean(product.featured),
       active: Boolean(product.active),
+      productType: isSimple ? "simple" : "variant",
     },
     colors,
     images,
+    gallery,
+    stock: stockRow ? stockRow.stock : null,
     inventory,
     thumbnail,
   };

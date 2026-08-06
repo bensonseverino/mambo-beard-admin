@@ -97,6 +97,10 @@ const REFRESH_INTERVAL_MS = 45000;
 
 const sizeOptions = ["XS", "S", "M", "L", "XL"];
 
+// Pseudo key for the simple-product gallery upload queue (there are no
+// colors, so images are tracked against the product itself).
+const GALLERY_KEY = "__gallery__";
+
 const createSeedState = () => ({
   products: [
     {
@@ -108,6 +112,7 @@ const createSeedState = () => ({
       category: "Care",
       featured: true,
       active: true,
+      productType: "variant",
       colors: [
         {
           id: "color-1",
@@ -136,6 +141,7 @@ const createSeedState = () => ({
       category: "Tools",
       featured: false,
       active: true,
+      productType: "variant",
       colors: [
         {
           id: "color-2",
@@ -268,6 +274,23 @@ const getProductValidation = (product) => {
   if (!product.price || Number(product.price) <= 0) {
     errors.push("Enter a price greater than zero.");
   }
+
+  // Simple products only need a stock quantity and a gallery; colors,
+  // sizes, and the variant inventory matrix do not apply.
+  if ((product.productType || "variant") === "simple") {
+    const stock = Number(product.stock);
+    if (!Number.isFinite(stock) || stock < 0) {
+      errors.push("Enter a valid stock quantity.");
+    }
+    const images = normalizeColorImages(product.gallery);
+    if (!images.length) {
+      errors.push("Add at least one gallery image.");
+    } else if (!images.some((image) => image.isPrimary)) {
+      errors.push("Set a primary gallery image.");
+    }
+    return errors;
+  }
+
   if (!product.colors?.length) errors.push("Add at least one color.");
   product.colors?.forEach((color, index) => {
     if (!color.name?.trim()) {
@@ -730,7 +753,8 @@ function DashboardView() {
                       </p>
                       <p className="mt-1 text-sm text-slate-300">
                         {item.colorName ? `${item.colorName} • ` : ""}
-                        Size {item.size} • {item.stock} units left
+                        {item.size ? `Size ${item.size} • ` : ""}
+                        {item.stock} units left
                       </p>
                     </div>
                   ))
@@ -758,9 +782,20 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     category: "Care",
     featured: false,
     active: true,
+    productType: "variant",
     colors: [],
+    gallery: [],
+    stock: "",
   });
   const [uploadQueues, setUploadQueues] = useState({});
+  const [typeFilter, setTypeFilter] = useState("all");
+
+  const visibleProducts = useMemo(() => {
+    if (typeFilter === "all") return state.products;
+    return state.products.filter(
+      (product) => (product.productType || "variant") === typeFilter,
+    );
+  }, [state.products, typeFilter]);
 
   const validationMessages = useMemo(
     () => getProductValidation(draft),
@@ -770,21 +805,27 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
 
   const saveProduct = async (event) => {
     event.preventDefault();
+    const isSimple = draft.productType === "simple";
     const normalized = {
       ...draft,
       id: draft.id || `prod-${Date.now()}`,
       slug: slugifyValue(draft.slug || draft.name),
       price: Number(draft.price) || 0,
-      colors: draft.colors.length
-        ? draft.colors.map((color) => ({
-            ...color,
-            images: normalizeColorImages(color.images),
-            variants: color.variants?.map((variant) => ({
-              ...variant,
-              stock: Number(variant.stock) || 0,
-            })),
-          }))
-        : [createColorTemplate(0)],
+      productType: isSimple ? "simple" : "variant",
+      stock: isSimple ? Math.max(0, Number(draft.stock) || 0) : undefined,
+      gallery: isSimple ? normalizeColorImages(draft.gallery) : undefined,
+      colors: isSimple
+        ? []
+        : draft.colors.length
+          ? draft.colors.map((color) => ({
+              ...color,
+              images: normalizeColorImages(color.images),
+              variants: color.variants?.map((variant) => ({
+                ...variant,
+                stock: Number(variant.stock) || 0,
+              })),
+            }))
+          : [createColorTemplate(0)],
     };
 
     try {
@@ -822,7 +863,10 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         category: "Care",
         featured: false,
         active: true,
+        productType: "variant",
         colors: [],
+        gallery: [],
+        stock: "",
       });
     } catch (error) {
       console.error("Unable to save product", error);
@@ -924,10 +968,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     }));
   };
 
-  const addImageToColor = async (colorId, files, imageType = "front") => {
-    const color = draft.colors.find((item) => item.id === colorId);
-    if (!color) return;
-
+  const enqueueUploads = (colorId, files, imageType) => {
     const colorQueue = Array.from(files).map((file, index) => ({
       id: `${colorId}-${Date.now()}-${index}`,
       file,
@@ -950,9 +991,22 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     });
   };
 
-  const uploadQueueItem = async (colorId, queueItem) => {
+  const addImageToColor = async (colorId, files, imageType = "front") => {
     const color = draft.colors.find((item) => item.id === colorId);
     if (!color) return;
+    enqueueUploads(colorId, files, imageType);
+  };
+
+  const addImageToGallery = (files, imageType = "gallery") => {
+    enqueueUploads(GALLERY_KEY, files, imageType);
+  };
+
+  const uploadQueueItem = async (colorId, queueItem) => {
+    const isGallery = colorId === GALLERY_KEY;
+    const color = isGallery
+      ? null
+      : draft.colors.find((item) => item.id === colorId);
+    if (!isGallery && !color) return;
 
     const token = localStorage.getItem("mambo-admin-token") || "";
 
@@ -980,7 +1034,9 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
       const formData = new FormData();
       formData.append("file", queueItem.file);
       formData.append("productSlug", draft.slug || "product");
-      formData.append("colorName", color.name || "color");
+      // Simple products upload into a single color-less gallery folder.
+      formData.append("colorName", isGallery ? "gallery" : color.name || "color");
+      formData.append("gallery", isGallery ? "1" : "0");
       formData.append("imageType", queueItem.imageType);
 
       const response = await fetch("/api/upload", {
@@ -996,6 +1052,9 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         throw new Error(payload.error || "Upload failed");
       }
 
+      const existingImages = normalizeColorImages(
+        isGallery ? draft.gallery : color.images,
+      );
       const uploadedImage = {
         id: `${queueItem.id}-uploaded`,
         path: payload.path,
@@ -1004,21 +1063,29 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         fileName: queueItem.fileName,
         size: queueItem.size,
         uploadedAt: new Date().toISOString(),
-        isPrimary: !normalizeColorImages(color.images).length,
-        sortOrder: normalizeColorImages(color.images).length + 1,
+        isPrimary: !existingImages.length,
+        sortOrder: existingImages.length + 1,
       };
 
-      setDraft((current) => ({
-        ...current,
-        colors: current.colors.map((item) => {
-          if (item.id !== colorId) return item;
-          const nextImages = normalizeColorImages(item.images);
+      setDraft((current) => {
+        if (isGallery) {
           return {
-            ...item,
-            images: [...nextImages, uploadedImage],
+            ...current,
+            gallery: [...normalizeColorImages(current.gallery), uploadedImage],
           };
-        }),
-      }));
+        }
+        return {
+          ...current,
+          colors: current.colors.map((item) => {
+            if (item.id !== colorId) return item;
+            const nextImages = normalizeColorImages(item.images);
+            return {
+              ...item,
+              images: [...nextImages, uploadedImage],
+            };
+          }),
+        };
+      });
 
       setUploadQueues((current) => ({
         ...current,
@@ -1168,6 +1235,57 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     void addImageToColor(colorId, files, imageType);
   };
 
+  const handleGalleryFileSelection = (event, imageType) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    void addImageToGallery(files, imageType);
+    event.target.value = "";
+  };
+
+  const handleGalleryDrop = (event, imageType) => {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) return;
+    void addImageToGallery(files, imageType);
+  };
+
+  const updateGalleryImage = (imageId, changes) => {
+    setDraft((current) => ({
+      ...current,
+      gallery: normalizeColorImages(current.gallery).map((image) =>
+        image.id === imageId ? { ...image, ...changes } : image,
+      ),
+    }));
+  };
+
+  const removeGalleryImage = (imageId) => {
+    setDraft((current) => {
+      const nextImages = normalizeColorImages(current.gallery).filter(
+        (image) => image.id !== imageId,
+      );
+      const shouldSetPrimary =
+        nextImages.length && !nextImages.some((image) => image.isPrimary);
+      return {
+        ...current,
+        gallery: nextImages.map((image, index) => ({
+          ...image,
+          isPrimary: shouldSetPrimary && index === 0 ? true : image.isPrimary,
+          sortOrder: index + 1,
+        })),
+      };
+    });
+  };
+
+  const setPrimaryGalleryImage = (imageId) => {
+    setDraft((current) => ({
+      ...current,
+      gallery: normalizeColorImages(current.gallery).map((image) => ({
+        ...image,
+        isPrimary: image.id === imageId,
+      })),
+    }));
+  };
+
   return (
     <div className="space-y-6">
       <section className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
@@ -1180,6 +1298,98 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
           </div>
         </div>
         <form onSubmit={saveProduct} className="mt-6 grid gap-4 lg:grid-cols-2">
+          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <h3 className="text-lg font-semibold text-white">Product Type</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Choose how this product is sold.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label
+                className={`cursor-pointer rounded-2xl border p-4 transition ${
+                  draft.productType !== "simple"
+                    ? "border-amber-400/40 bg-amber-500/10"
+                    : "border-white/10 bg-slate-900/70 hover:border-white/25"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="product-type"
+                  className="sr-only"
+                  checked={draft.productType !== "simple"}
+                  onChange={() =>
+                    setDraft((current) => {
+                      // simple → variant: carry gallery images into the first
+                      // color so no assets are orphaned by the rebuild.
+                      const galleryImages = normalizeColorImages(current.gallery);
+                      const hasColorImages = (current.colors || []).some(
+                        (color) => normalizeColorImages(color.images).length,
+                      );
+                      return {
+                        ...current,
+                        productType: "variant",
+                        colors:
+                          hasColorImages || !galleryImages.length
+                            ? current.colors
+                            : current.colors.map((color, index) =>
+                                index === 0
+                                  ? { ...color, images: galleryImages }
+                                  : color,
+                              ),
+                      };
+                    })
+                  }
+                />
+                <span className="block">
+                  <span className="font-semibold text-white">
+                    Variant Product
+                  </span>
+                  <span className="mt-1 block text-sm text-slate-400">
+                    Colors, sizes, and per-variant inventory. Best for apparel.
+                  </span>
+                </span>
+              </label>
+              <label
+                className={`cursor-pointer rounded-2xl border p-4 transition ${
+                  draft.productType === "simple"
+                    ? "border-amber-400/40 bg-amber-500/10"
+                    : "border-white/10 bg-slate-900/70 hover:border-white/25"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="product-type"
+                  className="sr-only"
+                  checked={draft.productType === "simple"}
+                  onChange={() =>
+                    setDraft((current) => {
+                      // variant → simple: flatten every color's images into
+                      // the gallery so switching types never loses uploads.
+                      const flattened = (current.colors || []).flatMap((color) =>
+                        normalizeColorImages(color.images),
+                      );
+                      return {
+                        ...current,
+                        productType: "simple",
+                        gallery: normalizeColorImages(current.gallery).length
+                          ? current.gallery
+                          : flattened,
+                      };
+                    })
+                  }
+                />
+                <span className="block">
+                  <span className="font-semibold text-white">
+                    Simple Product
+                  </span>
+                  <span className="mt-1 block text-sm text-slate-400">
+                    One price and a single stock quantity. Best for
+                    accessories, mugs, and posters.
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <h3 className="text-lg font-semibold text-white">
               Product Details
@@ -1251,6 +1461,8 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             </div>
           </div>
 
+          {draft.productType !== "simple" ? (
+            <>
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -1634,6 +1846,239 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
               ))}
             </div>
           </div>
+            </>
+          ) : null}
+
+          {draft.productType === "simple" ? (
+            <>
+          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <h3 className="text-lg font-semibold text-white">Stock Quantity</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Total available units. Only one stock value exists for simple
+              products.
+            </p>
+            <input
+              type="number"
+              min="0"
+              value={draft.stock}
+              onChange={(event) =>
+                setDraft({ ...draft, stock: event.target.value })
+              }
+              className="mt-4 w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-3 text-sm text-white sm:max-w-xs"
+              placeholder="e.g. 53"
+            />
+          </div>
+
+          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-white">
+                  Product gallery
+                </h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  One gallery for every simple product — no color folders.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-dashed border-slate-700 px-3 py-2 text-sm text-slate-300">
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    accept={acceptedImageTypes.join(",")}
+                    multiple
+                    className="hidden"
+                    onChange={(event) =>
+                      handleGalleryFileSelection(event, "front")
+                    }
+                  />
+                  + Upload Images
+                </label>
+              </div>
+            </div>
+            <div
+              className="mt-4 rounded-2xl border border-dashed border-slate-700 bg-slate-950/70 p-4"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => handleGalleryDrop(event, "gallery")}
+            >
+              <p className="text-sm font-medium text-slate-200">
+                Drag and drop files here
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                WebP, JPG, JPEG, and PNG up to 20 MB.
+              </p>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {imageTypeOptions.map((imageType) => (
+                <label
+                  key={imageType}
+                  className="rounded-full border border-slate-700 px-3 py-2 text-sm text-slate-300"
+                >
+                  <input
+                    type="file"
+                    accept={acceptedImageTypes.join(",")}
+                    multiple
+                    className="hidden"
+                    onChange={(event) =>
+                      handleGalleryFileSelection(event, imageType)
+                    }
+                  />
+                  {imageType}
+                </label>
+              ))}
+            </div>
+            <div className="mt-4 space-y-3">
+              {normalizeColorImages(draft.gallery).map((image) => (
+                <div
+                  key={image.id}
+                  className="rounded-2xl border border-white/10 bg-slate-950/70 p-3"
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
+                    <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-slate-900">
+                      {image.previewUrl ? (
+                        <img
+                          src={image.previewUrl}
+                          alt={image.fileName}
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <span className="text-xs text-slate-400">
+                          Preview
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex-1 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-300">
+                          {image.type}
+                        </span>
+                        {image.isPrimary ? (
+                          <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-300">
+                            Primary
+                          </span>
+                        ) : null}
+                        <span className="text-xs text-slate-500">
+                          {formatBytes(image.size || 0)}
+                        </span>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="text-sm text-slate-300">
+                          Image type
+                          <select
+                            value={image.type}
+                            onChange={(event) =>
+                              updateGalleryImage(image.id, {
+                                type: event.target.value,
+                              })
+                            }
+                            className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+                          >
+                            {imageTypeOptions.map((type) => (
+                              <option key={type} value={type}>
+                                {type}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="text-sm text-slate-300">
+                          Path
+                          <input
+                            value={image.path}
+                            readOnly
+                            className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPrimaryGalleryImage(image.id)}
+                          className="rounded-full border border-amber-500/30 px-3 py-1.5 text-sm text-amber-300"
+                        >
+                          Set as primary
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigator.clipboard?.writeText(image.path)
+                          }
+                          className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300"
+                        >
+                          Copy path
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeGalleryImage(image.id)}
+                          className="rounded-full border border-rose-500/20 px-3 py-1.5 text-sm text-rose-300"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {!normalizeColorImages(draft.gallery).length ? (
+                <p className="text-sm text-slate-500">
+                  No images yet. Upload the first asset to populate the
+                  gallery.
+                </p>
+              ) : null}
+            </div>
+            <div className="mt-4 space-y-2">
+              {uploadQueues[GALLERY_KEY]?.map((queueItem) => (
+                <div
+                  key={queueItem.id}
+                  className="rounded-2xl border border-slate-700 bg-slate-950/70 p-3"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-white">
+                        {queueItem.fileName}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {queueItem.imageType}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      {queueItem.status === "error" ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            retryUpload(GALLERY_KEY, queueItem.id)
+                          }
+                          className="rounded-full border border-amber-500/30 px-3 py-1.5 text-sm text-amber-300"
+                        >
+                          Retry
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          cancelUpload(GALLERY_KEY, queueItem.id)
+                        }
+                        className="rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-300"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-3 h-2 rounded-full bg-slate-800">
+                    <div
+                      className="h-2 rounded-full bg-amber-500 transition-all"
+                      style={{ width: `${queueItem.progress}%` }}
+                    />
+                  </div>
+                  {queueItem.status === "error" ? (
+                    <p className="mt-2 text-sm text-rose-300">
+                      {queueItem.error}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+            </>
+          ) : null}
 
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1684,11 +2129,32 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             Loading products from the backend…
           </p>
         ) : null}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {[
+            { value: "all", label: "All" },
+            { value: "variant", label: "Variant" },
+            { value: "simple", label: "Simple" },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setTypeFilter(option.value)}
+              className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                typeFilter === option.value
+                  ? "border-amber-400/40 bg-amber-500/15 text-amber-300"
+                  : "border-slate-700 text-slate-300 hover:bg-white/5"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm text-slate-300">
             <thead className="text-xs uppercase tracking-[0.2em] text-slate-500">
               <tr>
                 <th className="px-3 py-3">Product</th>
+                <th className="px-3 py-3">Type</th>
                 <th className="px-3 py-3">Price</th>
                 <th className="px-3 py-3">Category</th>
                 <th className="px-3 py-3">Status</th>
@@ -1696,11 +2162,29 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
               </tr>
             </thead>
             <tbody>
-              {state.products.map((product) => (
+              {visibleProducts.map((product) => {
+                const productType = product.productType || "variant";
+                return (
                 <tr key={product.id} className="border-t border-white/10">
                   <td className="px-3 py-3">
-                    <p className="font-semibold text-white">{product.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold text-white">
+                        {product.name}
+                      </p>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                          productType === "simple"
+                            ? "bg-sky-500/15 text-sky-300"
+                            : "bg-violet-500/15 text-violet-300"
+                        }`}
+                      >
+                        {productType}
+                      </span>
+                    </div>
                     <p className="text-xs text-slate-500">{product.slug}</p>
+                  </td>
+                  <td className="px-3 py-3 text-xs text-slate-400">
+                    {productType === "simple" ? "No colors / sizes" : "Colors & sizes"}
                   </td>
                   <td className="px-3 py-3">{formatCurrency(product.price)}</td>
                   <td className="px-3 py-3">{product.category}</td>
@@ -1716,7 +2200,14 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                       <button
                         type="button"
                         className="rounded-full border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
-                        onClick={() => setDraft(product)}
+                        onClick={() =>
+                          setDraft({
+                            ...product,
+                            productType: product.productType || "variant",
+                            gallery: product.gallery || [],
+                            stock: product.stock ?? "",
+                          })
+                        }
                       >
                         Edit
                       </button>
@@ -1739,7 +2230,8 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1854,8 +2346,7 @@ function InventoryView() {
           <p className="mt-6 text-sm text-slate-400">Loading inventory…</p>
         ) : inventory.length === 0 ? (
           <p className="mt-6 text-sm text-slate-400">
-            No inventory rows yet. Create products with variants to populate
-            stock.
+            No inventory rows yet. Create products to populate stock.
           </p>
         ) : (
           <div className="mt-6 grid gap-4">
@@ -1866,9 +2357,24 @@ function InventoryView() {
               >
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <p className="font-semibold text-white">
-                      {group.productName}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold text-white">
+                        {group.productName}
+                      </p>
+                      {group.productType ? (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                            group.productType === "simple"
+                              ? "bg-sky-500/15 text-sky-300"
+                              : "bg-violet-500/15 text-violet-300"
+                          }`}
+                        >
+                          {group.productType === "simple"
+                            ? "Simple"
+                            : "Variant"}
+                        </span>
+                      ) : null}
+                    </div>
                     <p className="text-sm text-slate-400">
                       {group.category || "—"}
                     </p>
@@ -1877,16 +2383,18 @@ function InventoryView() {
                 <div className="mt-4 grid gap-3 xl:grid-cols-2">
                   {group.colors.map((color) => (
                     <div
-                      key={color.colorId}
+                      key={color.colorId ?? "simple"}
                       className="rounded-2xl border border-white/10 bg-slate-900/70 p-3"
                     >
                       <div className="flex items-center gap-3">
-                        <span
-                          className="h-3.5 w-3.5 rounded-full"
-                          style={{ backgroundColor: color.hex }}
-                        />
+                        {color.hex ? (
+                          <span
+                            className="h-3.5 w-3.5 rounded-full"
+                            style={{ backgroundColor: color.hex }}
+                          />
+                        ) : null}
                         <p className="font-medium text-white">
-                          {color.colorName}
+                          {color.colorName || "—"}
                         </p>
                       </div>
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -1896,7 +2404,9 @@ function InventoryView() {
                             className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-300"
                           >
                             <div className="flex items-center justify-between">
-                              <span>Size {row.size}</span>
+                              <span>
+                                {row.size ? `Size ${row.size}` : "Total stock"}
+                              </span>
                               {savingId === row.id ? (
                                 <span className="text-xs text-amber-300">
                                   Saving…

@@ -39,6 +39,10 @@ export async function onRequestPost(context) {
     const productSlug = sanitizeSegment(formData.get("productSlug") || "product");
     const colorName = sanitizeSegment(formData.get("colorName") || "color");
     const imageType = sanitizeSegment(formData.get("imageType") || "gallery");
+    // Simple products upload a single color-less gallery:
+    // products/<slug>/gallery/<type>/<file>. Variant products keep the
+    // per-color layout: products/<slug>/<color>/<type>/<file>.
+    const isGallery = formData.get("gallery") === "1";
 
     const mimeType = file.type || "";
     if (!acceptedImageTypes.includes(mimeType)) {
@@ -63,7 +67,9 @@ export async function onRequestPost(context) {
           ? "webp"
           : "jpg";
     const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${extension}`;
-    const path = `products/${productSlug}/${colorName}/${imageType}/${uniqueName}`;
+    const path = isGallery
+      ? `products/${productSlug}/gallery/${imageType}/${uniqueName}`
+      : `products/${productSlug}/${colorName}/${imageType}/${uniqueName}`;
 
     if (!env?.PRODUCTS) {
       return Response.json(

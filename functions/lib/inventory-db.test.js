@@ -50,6 +50,49 @@ test("listInventory groups stock by product, color, and size", async () => {
   assert.equal(mRow.stock, 5);
 });
 
+const seedSimpleProduct = async (env) => {
+  await createProduct(env, {
+    id: "prod-tote",
+    name: "Mambo Tote Bag",
+    slug: "mambo-tote-bag",
+    price: 12,
+    category: "Accessories",
+    productType: "simple",
+    stock: 53,
+    gallery: [],
+  });
+};
+
+test("listInventory groups simple product stock without color or size", async () => {
+  const env = await makeEnv();
+  await seedSimpleProduct(env);
+
+  const inventory = await listInventory(env);
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].productName, "Mambo Tote Bag");
+  assert.equal(inventory[0].productType, "simple");
+  assert.equal(inventory[0].colors.length, 1);
+  const color = inventory[0].colors[0];
+  assert.equal(color.colorId, null);
+  assert.equal(color.rows.length, 1);
+  assert.equal(color.rows[0].size, null);
+  assert.equal(color.rows[0].stock, 53);
+});
+
+test("updateInventoryStock updates a simple product stock row without touching variants", async () => {
+  const env = await makeEnv();
+  await seedSimpleProduct(env);
+
+  const inventory = await listInventory(env);
+  const rowId = inventory[0].colors[0].rows[0].id;
+
+  const updated = await updateInventoryStock(env, rowId, 9);
+  assert.equal(updated.stock, 9);
+  assert.equal(env.DB._rows("inventory")[0].stock, 9);
+  // No product_variants mirror exists for simple products.
+  assert.equal(env.DB._rows("product_variants").length, 0);
+});
+
 test("updateInventoryStock updates the inventory row and its variant mirror", async () => {
   const env = await makeEnv();
   await seedProduct(env);

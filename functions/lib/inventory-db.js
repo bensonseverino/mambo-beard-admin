@@ -23,7 +23,9 @@ export const listInventory = async (env) => {
   const [inventoryResult, productsResult, colorsResult, sizesResult] =
     await Promise.all([
       env.DB.prepare("SELECT * FROM inventory").all(),
-      env.DB.prepare("SELECT id, name, category, active FROM products").all(),
+      env.DB.prepare(
+        "SELECT id, name, category, active, product_type FROM products",
+      ).all(),
       env.DB.prepare("SELECT id, name, hex FROM product_colors").all(),
       env.DB.prepare("SELECT id, name FROM sizes").all(),
     ]);
@@ -41,9 +43,10 @@ export const listInventory = async (env) => {
   const groups = new Map();
   for (const row of inventoryResult.results || []) {
     const product = productById.get(row.product_id);
-    const color = colorById.get(row.color_id);
     // Skip soft-deleted products — their stock is no longer sellable.
-    if (!product || !product.active || !color) continue;
+    if (!product || !product.active) continue;
+
+    const isSimple = String(product.product_type || "variant") === "simple";
 
     let group = groups.get(row.product_id);
     if (!group) {
@@ -51,10 +54,35 @@ export const listInventory = async (env) => {
         productId: row.product_id,
         productName: product.name,
         category: product.category,
+        productType: isSimple ? "simple" : "variant",
         colors: new Map(),
       };
       groups.set(row.product_id, group);
     }
+
+    if (isSimple) {
+      // Simple products: a single stock row with no color and no size.
+      let colorGroup = group.colors.get(null);
+      if (!colorGroup) {
+        colorGroup = {
+          colorId: null,
+          colorName: "Stock",
+          hex: null,
+          rows: [],
+        };
+        group.colors.set(null, colorGroup);
+      }
+      colorGroup.rows.push({
+        id: row.id,
+        sizeId: null,
+        size: null,
+        stock: toInt(row.stock),
+      });
+      continue;
+    }
+
+    const color = colorById.get(row.color_id);
+    if (!color) continue;
 
     let colorGroup = group.colors.get(row.color_id);
     if (!colorGroup) {

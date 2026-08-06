@@ -17,6 +17,7 @@ export const SCHEMA_STATEMENTS = [
     category TEXT,
     featured INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    product_type TEXT NOT NULL DEFAULT 'variant',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -33,7 +34,7 @@ export const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS product_images (
     id TEXT PRIMARY KEY,
     product_id TEXT NOT NULL,
-    color_id TEXT NOT NULL,
+    color_id TEXT,
     path TEXT NOT NULL,
     type TEXT NOT NULL,
     file_name TEXT NOT NULL,
@@ -41,6 +42,7 @@ export const SCHEMA_STATEMENTS = [
     uploaded_at TEXT NOT NULL,
     is_primary INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 1,
+    -- color_id is NULL for simple-product gallery images.
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
     FOREIGN KEY (color_id) REFERENCES product_colors(id) ON DELETE CASCADE
   )`,
@@ -60,9 +62,10 @@ export const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS inventory (
     id TEXT PRIMARY KEY,
     product_id TEXT NOT NULL,
-    color_id TEXT NOT NULL,
-    size_id TEXT NOT NULL,
+    color_id TEXT,
+    size_id TEXT,
     stock INTEGER NOT NULL,
+    -- color_id / size_id are NULL for simple products (one row per product).
     FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
     FOREIGN KEY(color_id) REFERENCES product_colors(id) ON DELETE CASCADE,
     FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE
@@ -84,14 +87,15 @@ export const SCHEMA_STATEMENTS = [
     id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL,
     product_id TEXT NOT NULL,
-    color_id TEXT NOT NULL,
+    color_id TEXT,
     size TEXT,
     size_id TEXT,
     quantity INTEGER NOT NULL,
     price INTEGER NOT NULL,
     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
     -- No ON DELETE CASCADE on product_id/color_id: products are soft-deleted
-    -- (active = 0) so order history must survive deletes and edits.
+    -- (active = 0) so order history must survive deletes and edits. color_id
+    -- is NULL for simple-product order lines.
     FOREIGN KEY(product_id) REFERENCES products(id),
     FOREIGN KEY(color_id) REFERENCES product_colors(id),
     FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE

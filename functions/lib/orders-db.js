@@ -43,14 +43,16 @@ const mergeCartItems = (items) => {
   for (const item of items) {
     const productKey =
       item.productId || item.slug || (item.product?.id ? item.product.id : "");
-    const colorId = item.colorId || "";
-    const size = String(item.size || "").trim();
-    if (!productKey || !colorId || !size) {
+    if (!productKey) {
       throw apiError(
         "INVALID_PAYLOAD",
-        "Every cart item needs a product, color, and size.",
+        "Every cart item needs a product.",
       );
     }
+    // Simple products carry no color/size; variant products carry both.
+    // Missing values are validated per product type later.
+    const colorId = item.colorId || "";
+    const size = String(item.size || "").trim();
     const quantity = Math.max(1, toInt(item.quantity, 1));
     const key = `${productKey}|${colorId}|${size}`;
     const existing = merged.get(key);
@@ -114,42 +116,65 @@ export const createOrder = async (env, payload) => {
       );
     }
 
-    const color = await env.DB.prepare(
-      "SELECT * FROM product_colors WHERE id = ? AND product_id = ?",
-    )
-      .bind(item.colorId, product.id)
-      .first();
-    if (!color) {
-      throw apiError(
-        "COLOR_NOT_FOUND",
-        `Color not found for product "${product.name}".`,
-      );
+    const isSimple = String(product.product_type || "variant") === "simple";
+    let size = null;
+    let inventoryRow;
+    let variant = null;
+
+    if (isSimple) {
+      // Simple products: colors/sizes are ignored. Validate the single
+      // stock row (product → stock).
+      inventoryRow = await env.DB.prepare(
+        "SELECT * FROM inventory WHERE product_id = ? AND color_id IS NULL AND size_id IS NULL",
+      )
+        .bind(product.id)
+        .first();
+    } else {
+      const color = await env.DB.prepare(
+        "SELECT * FROM product_colors WHERE id = ? AND product_id = ?",
+      )
+        .bind(item.colorId, product.id)
+        .first();
+      if (!color) {
+        throw apiError(
+          "COLOR_NOT_FOUND",
+          `Color not found for product "${product.name}".`,
+        );
+      }
+      if (!item.size) {
+        throw apiError(
+          "INVALID_PAYLOAD",
+          `Size is required for product "${product.name}".`,
+        );
+      }
+
+      size = await env.DB.prepare(
+        "SELECT * FROM sizes WHERE name = ?",
+      )
+        .bind(item.size)
+        .first();
+
+      // Fall back to product_variants stock when the inventory mirror is
+      // missing (e.g. products created before inventory sync shipped).
+      inventoryRow = await env.DB.prepare(
+        "SELECT * FROM inventory WHERE product_id = ? AND color_id = ? AND size_id = ?",
+      )
+        .bind(product.id, item.colorId, size?.id || "")
+        .first();
+      variant = await env.DB.prepare(
+        "SELECT * FROM product_variants WHERE product_id = ? AND color_id = ? AND size = ?",
+      )
+        .bind(product.id, item.colorId, item.size)
+        .first();
     }
-
-    const size = await env.DB.prepare(
-      "SELECT * FROM sizes WHERE name = ?",
-    )
-      .bind(item.size)
-      .first();
-
-    // Fall back to product_variants stock when the inventory mirror is
-    // missing (e.g. products created before inventory sync shipped).
-    const inventoryRow = await env.DB.prepare(
-      "SELECT * FROM inventory WHERE product_id = ? AND color_id = ? AND size_id = ?",
-    )
-      .bind(product.id, item.colorId, size?.id || "")
-      .first();
-    const variant = await env.DB.prepare(
-      "SELECT * FROM product_variants WHERE product_id = ? AND color_id = ? AND size = ?",
-    )
-      .bind(product.id, item.colorId, item.size)
-      .first();
 
     const stock = inventoryRow ? inventoryRow.stock : variant?.stock ?? 0;
     if (stock < item.quantity) {
       throw apiError(
         "INSUFFICIENT_STOCK",
-        `Insufficient stock for ${product.name} (${item.size}). Only ${stock} left.`,
+        isSimple
+          ? `Insufficient stock for ${product.name}. Only ${stock} left.`
+          : `Insufficient stock for ${product.name} (${item.size}). Only ${stock} left.`,
       );
     }
 
@@ -160,10 +185,13 @@ export const createOrder = async (env, payload) => {
     validated.push({
       ...item,
       productId: product.id,
-      sizeId: size?.id || `size-${slugifyValue(item.size)}`,
+      isSimple,
+      colorId: isSimple ? null : item.colorId,
+      size: isSimple ? "" : item.size,
+      sizeId: isSimple ? null : size?.id || `size-${slugifyValue(item.size)}`,
       price,
       stock,
-      sizeMissing: !size,
+      sizeMissing: !isSimple && !size,
       inventoryMissing: !inventoryRow,
     });
   }
@@ -225,6 +253,40 @@ export const createOrder = async (env, payload) => {
   ];
 
   for (const item of validated) {
+    if (item.isSimple) {
+      // Simple product line: color_id / size_id stay NULL.
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO order_items (id, order_id, product_id, color_id, size, size_id, quantity, price)
+           VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+        ).bind(
+          `item-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
+          orderId,
+          item.productId,
+          item.quantity,
+          item.price,
+        ),
+      );
+
+      // Make sure the single stock row exists for legacy simple products.
+      if (item.inventoryMissing) {
+        statements.push(
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, NULL, NULL, ?)`,
+          ).bind(`stock-${item.productId}`, item.productId, item.stock),
+        );
+      }
+
+      // Guarded deduction — stock can never drop below zero.
+      statements.push(
+        env.DB.prepare(
+          `UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND color_id IS NULL AND size_id IS NULL AND stock >= ?`,
+        ).bind(item.quantity, item.productId, item.quantity),
+      );
+      continue;
+    }
+
     // Ensure the size row exists for legacy data.
     if (item.sizeMissing) {
       statements.push(
