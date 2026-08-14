@@ -387,3 +387,185 @@ test("updateOrderStatus updates an existing order and 404s unknown ids", async (
     (error) => error.code === "INVALID_STATUS" && error.status === 400,
   );
 });
+
+const seedColorOnlyProduct = async (env) => {
+  await createProduct(env, {
+    id: "prod-cap",
+    name: "Mambo Cap",
+    slug: "mambo-cap",
+    price: 15,
+    category: "Accessories",
+    variationType: "color",
+    colors: [
+      { id: "color-black", name: "Black", hex: "#000000", images: [], variants: [{ size: null, stock: 10 }] },
+      { id: "color-cream", name: "Cream", hex: "#F2E8D5", images: [], variants: [{ size: null, stock: 2 }] },
+    ],
+  });
+};
+
+const seedSizeOnlyProduct = async (env) => {
+  await createProduct(env, {
+    id: "prod-tshirt",
+    name: "Mambo T-Shirt",
+    slug: "mambo-t-shirt",
+    price: 25,
+    category: "Apparel",
+    variationType: "size",
+    sizes: [
+      { id: "size-s", name: "S", stock: 4 },
+      { id: "size-xxl", name: "XXL", stock: 3 },
+    ],
+  });
+};
+
+test("checkout rejects size on a color-only product (invalid combination)", async () => {
+  const env = await makeEnv();
+  await seedColorOnlyProduct(env);
+
+  await assert.rejects(
+    () =>
+      createOrder(env, {
+        customer: { name: "Jane Doe", phone: "+254700000000" },
+        items: [
+          { productId: "prod-cap", colorId: "color-black", size: "XXL", quantity: 1 },
+        ],
+      }),
+    (error) =>
+      error.code === "INVALID_VARIATION" &&
+      error.status === 400 &&
+      /does not support size variations/.test(error.message),
+  );
+  assert.equal(env.DB._rows("orders").length, 0);
+});
+
+test("checkout rejects color on a size-only product (invalid combination)", async () => {
+  const env = await makeEnv();
+  await seedSizeOnlyProduct(env);
+
+  await assert.rejects(
+    () =>
+      createOrder(env, {
+        customer: { name: "Jane Doe", phone: "+254700000000" },
+        items: [
+          { productId: "prod-tshirt", colorId: "color-black", size: "XXL", quantity: 1 },
+        ],
+      }),
+    (error) =>
+      error.code === "INVALID_VARIATION" &&
+      error.status === 400 &&
+      /does not support color variations/.test(error.message),
+  );
+});
+
+test("checkout rejects colors and sizes on a no-variation product", async () => {
+  const env = await makeEnv();
+  await createProduct(env, {
+    id: "prod-tote",
+    name: "Tote",
+    slug: "tote",
+    price: 25,
+    variationType: "none",
+    stock: 9,
+    gallery: [],
+  });
+
+  await assert.rejects(
+    () =>
+      createOrder(env, {
+        customer: { name: "Jane Doe", phone: "+254700000000" },
+        items: [{ productId: "prod-tote", colorId: "color-black", quantity: 1 }],
+      }),
+    (error) => error.code === "INVALID_VARIATION" && error.status === 400,
+  );
+});
+
+test("checkout supports color-only products: per-color stock deduction, NULL size", async () => {
+  const env = await makeEnv();
+  await seedColorOnlyProduct(env);
+
+  const order = await createOrder(env, {
+    customer: { name: "Jane Doe", phone: "+254700000000" },
+    items: [{ productId: "prod-cap", colorId: "color-black", quantity: 2 }],
+  });
+  assert.equal(order.subtotal, 30); // 15 * 2
+
+  const items = env.DB._rows("order_items");
+  assert.equal(items.length, 1);
+  assert.equal(items[0].color_id, "color-black");
+  assert.equal(items[0].size_id, null);
+  assert.equal(items[0].size, null);
+
+  const inventory = env.DB._rows("inventory");
+  const black = inventory.find((row) => row.color_id === "color-black");
+  assert.equal(black.stock, 8);
+  const cream = inventory.find((row) => row.color_id === "color-cream");
+  assert.equal(cream.stock, 2);
+  // Color-only products have no product_variants mirror.
+  assert.equal(env.DB._rows("product_variants").length, 0);
+});
+
+test("checkout supports size-only products including XXL via size id", async () => {
+  const env = await makeEnv();
+  await seedSizeOnlyProduct(env);
+
+  const order = await createOrder(env, {
+    customer: { name: "Jane Doe", phone: "+254700000000" },
+    items: [
+      { productId: "prod-tshirt", sizeId: "size-xxl", quantity: 1 },
+      { productId: "prod-tshirt", size: "S", quantity: 2 },
+    ],
+  });
+  assert.equal(order.subtotal, 75); // 25 + 50
+
+  const items = env.DB._rows("order_items");
+  assert.equal(items.length, 2);
+  const xxlItem = items.find((item) => item.size_id === "size-xxl");
+  assert.equal(xxlItem.size, "XXL");
+  assert.equal(xxlItem.color_id, null);
+
+  const inventory = env.DB._rows("inventory");
+  const xxl = inventory.find((row) => row.size_id === "size-xxl");
+  assert.equal(xxl.stock, 2);
+  const s = inventory.find((row) => row.size_id === "size-s");
+  assert.equal(s.stock, 2);
+});
+
+test("checkout deducts the right color + size combination for color_size products", async () => {
+  const env = await makeEnv();
+  await createProduct(env, {
+    id: "prod-hoodie",
+    name: "Distorted Hoodie",
+    slug: "distorted-hoodie",
+    price: 45,
+    variationType: "color_size",
+    colors: [
+      {
+        id: "color-black",
+        name: "Black",
+        hex: "#000000",
+        images: [],
+        variants: [
+          { size: "S", stock: 2 },
+          { size: "XXL", stock: 5 },
+        ],
+      },
+    ],
+  });
+
+  await createOrder(env, {
+    customer: { name: "Jane Doe", phone: "+254700000000" },
+    items: [{ productId: "prod-hoodie", colorId: "color-black", size: "XXL", quantity: 2 }],
+  });
+
+  const inventory = env.DB._rows("inventory");
+  const xxlRow = inventory.find((row) => row.size_id === "size-xxl");
+  assert.equal(xxlRow.stock, 3);
+  const sRow = inventory.find((row) => row.size_id === "size-s");
+  assert.equal(sRow.stock, 2);
+
+  // The product_variants mirror is deducted too.
+  const variant = env.DB
+    ._rows("product_variants")
+    .find((v) => v.size === "XXL");
+  assert.equal(variant.stock, 3);
+});

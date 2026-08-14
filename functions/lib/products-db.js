@@ -1,5 +1,17 @@
 import { apiError, ensureSchema } from "./schema.js";
 
+// Per-product variation configuration. The admin dashboard is the source of
+// truth: every product carries exactly one of these values.
+//
+//   'none'       — simple product: one price, one stock figure, no selectors
+//   'color'      — customers pick a color only
+//   'size'       — customers pick a size only
+//   'color_size' — customers pick both a color and a size
+export const VARIATION_TYPES = ["none", "color", "size", "color_size"];
+
+export const hasColorVariation = (type) => type === "color" || type === "color_size";
+export const hasSizeVariation = (type) => type === "size" || type === "color_size";
+
 const slugifyValue = (value) =>
   String(value || "")
     .toLowerCase()
@@ -18,6 +30,16 @@ const toInt = (value, fallback = 0) => {
   return Number.isFinite(number) ? Math.trunc(number) : fallback;
 };
 
+// Canonical display order for the size catalog (alphabetical order would put
+// L before M and S). Any unknown size sorts after the standard list.
+const STANDARD_SIZE_ORDER = ["XS", "S", "M", "L", "XL", "XXL"];
+const sizeRank = (name) => {
+  const index = STANDARD_SIZE_ORDER.indexOf(String(name || "").trim());
+  return index === -1 ? STANDARD_SIZE_ORDER.length : index;
+};
+const sortSizes = (sizes) =>
+  [...sizes].sort((a, b) => sizeRank(a.name) - sizeRank(b.name));
+
 /** Normalize an image entry into the canonical shape used everywhere. */
 const normalizeImages = (images) =>
   (Array.isArray(images) ? images : []).map((image, index) => ({
@@ -35,65 +57,95 @@ const normalizeImages = (images) =>
     sortOrder: Number(image?.sortOrder || index + 1),
   }));
 
+const normalizeVariants = (variants, fallbackSizes) => {
+  const source =
+    Array.isArray(variants) && variants.length ? variants : fallbackSizes;
+  return source.map((variant, index) => ({
+    size: String(variant?.size || fallbackSizes?.[index]?.size || "S"),
+    stock: Math.max(0, toInt(variant?.stock)),
+  }));
+};
+
+const normalizeColors = (colors, colorSize) => {
+  const source = Array.isArray(colors) && colors.length ? colors : [];
+  const fallbackSizes = ["S", "M", "L", "XL", "XXL"].map((size) => ({
+    size,
+    stock: 0,
+  }));
+  return source.map((color, index) => {
+    const variants = colorSize
+      ? normalizeVariants(color?.variants, fallbackSizes)
+      : [
+          // Color-only products track one stock figure per color (size null).
+          {
+            size: null,
+            stock: Math.max(
+              0,
+              toInt(
+                color?.stock ??
+                  color?.variants?.[0]?.stock ??
+                  0,
+              ),
+            ),
+          },
+        ];
+    return {
+      id: color?.id || buildColorId(index),
+      name: String(color?.name || `Color ${index + 1}`).trim(),
+      hex: String(color?.hex || "#111827"),
+      sortOrder: Number(color?.sortOrder || index + 1),
+      images: normalizeImages(color?.images),
+      variants,
+    };
+  });
+};
+
+const normalizeSizes = (sizes) =>
+  (Array.isArray(sizes) ? sizes : []).map((size, index) => ({
+    id: String(
+      size?.id || `size-${slugifyValue(size?.name || `size-${index + 1}`)}`,
+    ),
+    name: String(size?.name || size?.id || `Size ${index + 1}`),
+    stock: Math.max(0, toInt(size?.stock)),
+  }));
+
+/**
+ * Normalize an admin payload into the canonical product shape. The four
+ * variation modes change which fields are meaningful:
+ *
+ *   none       → stock + gallery (no colors, no sizes)
+ *   color      → colors with one stock figure each
+ *   size       → sizes with one stock figure each
+ *   color_size → colors with per-size variants + the selected sizes
+ *
+ * Legacy payloads that still send productType are mapped: simple → none,
+ * variant → color_size.
+ */
 export const normalizeProductPayload = (product) => {
   const safeProduct = product || {};
-  const productType = safeProduct.productType === "simple" ? "simple" : "variant";
+  const variationType = VARIATION_TYPES.includes(safeProduct.variationType)
+    ? safeProduct.variationType
+    : safeProduct.productType === "simple"
+      ? "none"
+      : "color_size";
+  const color = hasColorVariation(variationType);
+  const size = hasSizeVariation(variationType);
 
-  const normalizedColors =
-    productType === "simple"
-      ? []
-      : Array.isArray(safeProduct.colors) && safeProduct.colors.length
-        ? safeProduct.colors.map((color, index) => ({
-            id: color?.id || buildColorId(index),
-            name: String(color?.name || `Color ${index + 1}`).trim(),
-            hex: String(color?.hex || "#111827"),
-            sortOrder: Number(color?.sortOrder || index + 1),
-            images: normalizeImages(color?.images),
-            variants:
-              Array.isArray(color?.variants) && color.variants.length
-                ? color.variants.map((variant) => ({
-                    size: String(variant?.size || "M"),
-                    stock: Number(variant?.stock || 0),
-                  }))
-                : [
-                    { size: "XS", stock: 0 },
-                    { size: "S", stock: 0 },
-                    { size: "M", stock: 0 },
-                    { size: "L", stock: 0 },
-                    { size: "XL", stock: 0 },
-                  ],
-          }))
-        : [
-            {
-              id: buildColorId(0),
-              name: "Default",
-              hex: "#111827",
-              sortOrder: 1,
-              images: [],
-              variants: [
-                { size: "XS", stock: 0 },
-                { size: "S", stock: 0 },
-                { size: "M", stock: 0 },
-                { size: "L", stock: 0 },
-                { size: "XL", stock: 0 },
-              ],
-            },
-          ];
+  const colors = color ? normalizeColors(safeProduct.colors, variationType === "color_size") : [];
+  const sizes = size ? normalizeSizes(safeProduct.sizes) : [];
 
-  // Simple products own a single color-less gallery and one stock figure.
-  // When switching variant → simple without a gallery in the payload, the
-  // existing per-color images are flattened into the gallery instead of
-  // being discarded.
+  // Simple/size-only products own a single color-less gallery. When a
+  // payload switches a color-bearing product to one of these modes without a
+  // gallery, the existing per-color images are flattened into the gallery
+  // instead of being discarded.
   const gallery =
-    productType === "simple"
-      ? normalizeImages(
+    color
+      ? []
+      : normalizeImages(
           Array.isArray(safeProduct.gallery) && safeProduct.gallery.length
             ? safeProduct.gallery
-            : (safeProduct.colors || []).flatMap(
-                (color) => color.images || [],
-              ),
-        )
-      : [];
+            : (safeProduct.colors || []).flatMap((c) => c.images || []),
+        );
 
   return {
     id: String(safeProduct.id || `prod-${Date.now()}`),
@@ -104,10 +156,13 @@ export const normalizeProductPayload = (product) => {
     category: String(safeProduct.category || "Care").trim(),
     featured: Boolean(safeProduct.featured),
     active: safeProduct.active !== false,
-    productType,
-    stock: productType === "simple" ? Math.max(0, toInt(safeProduct.stock)) : null,
+    variationType,
+    productType: variationType === "none" ? "simple" : "variant",
+    stock:
+      variationType === "none" ? Math.max(0, toInt(safeProduct.stock)) : null,
     gallery,
-    colors: normalizedColors,
+    colors,
+    sizes,
   };
 };
 
@@ -134,6 +189,112 @@ const mapColorRow = (row, images, variants) => ({
   variants,
 });
 
+/**
+ * Build the storefront/admin-facing variation payload for one product row.
+ * Shared by listProducts and getProductDetail so both endpoints agree on the
+ * shape. `variationType` decides what is surfaced:
+ *
+ *   none       → gallery + stock
+ *   color      → colors (one stock per color)
+ *   size       → sizes (one stock per size) + gallery
+ *   color_size → colors (per-size stock) + sizes
+ */
+const buildProductVariation = (
+  product,
+  {
+    colorsByProduct,
+    imagesByColor,
+    galleryByProduct,
+    variantsByColor,
+    inventoryByProduct,
+    sizeNamesById,
+    colorStockByProduct,
+  },
+) => {
+  const variationType = VARIATION_TYPES.includes(product.variation_type)
+    ? product.variation_type
+    : String(product.product_type || "variant") === "simple"
+      ? "none"
+      : "color_size";
+  const color = hasColorVariation(variationType);
+  const size = hasSizeVariation(variationType);
+
+  let colors = [];
+  if (color) {
+    colors = (colorsByProduct.get(product.id) || []).map((colorRow) => {
+      let variants;
+      if (variationType === "color_size") {
+        variants = sortSizes(
+          (variantsByColor.get(colorRow.id) || []).map((variant) => ({
+            size: variant.size,
+            stock: variant.stock,
+          })),
+        );
+      } else {
+        const stockRow = (colorStockByProduct.get(product.id) || []).find(
+          (entry) => entry.colorId === colorRow.id,
+        );
+        variants = [{ size: null, stock: stockRow ? stockRow.stock : 0 }];
+      }
+      return mapColorRow(
+        colorRow,
+        imagesByColor.get(colorRow.id) || [],
+        variants,
+      );
+    });
+  }
+
+  let sizes = [];
+  if (size) {
+    const rows = inventoryByProduct.get(product.id) || [];
+    if (variationType === "size") {
+      // Size-only: one stock figure per size (no color dimension).
+      sizes = sortSizes(
+        rows
+          .filter((entry) => entry.colorId == null && entry.sizeId != null)
+          .map((entry) => ({
+            id: entry.sizeId,
+            name: sizeNamesById.get(entry.sizeId) || entry.sizeId,
+            stock: entry.stock,
+          })),
+      );
+    } else {
+      // Color + size: the selected sizes are the union of the inventory rows.
+      const seen = new Map();
+      for (const entry of rows) {
+        if (entry.colorId == null || entry.sizeId == null) continue;
+        if (!seen.has(entry.sizeId)) {
+          seen.set(entry.sizeId, {
+            id: entry.sizeId,
+            name: sizeNamesById.get(entry.sizeId) || entry.sizeId,
+          });
+        }
+      }
+      sizes = sortSizes([...seen.values()]);
+    }
+  }
+
+  return {
+    id: product.id,
+    name: product.name,
+    slug: product.slug,
+    description: product.description,
+    price: product.price,
+    category: product.category,
+    featured: Boolean(product.featured),
+    active: Boolean(product.active),
+    variationType,
+    productType: variationType === "none" ? "simple" : "variant",
+    colors,
+    sizes,
+    gallery: color ? [] : galleryByProduct.get(product.id) || [],
+    stock:
+      variationType === "none"
+        ? (colorStockByProduct.get(product.id) || [])[0]?.stock ?? null
+        : null,
+  };
+};
+
 export const listProducts = async (env, options = {}) => {
   if (!env?.DB) return [];
   await ensureSchema(env);
@@ -142,7 +303,7 @@ export const listProducts = async (env, options = {}) => {
   // includeInactive to see soft-deleted products and restore them.
   const activeClause = options.includeInactive ? "" : " WHERE active = 1";
 
-  const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult] =
+  const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
         `SELECT * FROM products${activeClause} ORDER BY created_at DESC`,
@@ -155,16 +316,21 @@ export const listProducts = async (env, options = {}) => {
       ).all(),
       env.DB.prepare("SELECT * FROM product_variants ORDER BY size ASC").all(),
       env.DB.prepare(
-        "SELECT product_id, color_id, stock FROM inventory",
+        "SELECT product_id, color_id, size_id, stock FROM inventory",
       ).all(),
+      env.DB.prepare("SELECT id, name FROM sizes").all(),
     ]);
+
+  const sizeNamesById = new Map(
+    (sizesResult.results || []).map((row) => [row.id, row.name]),
+  );
 
   const imagesByColor = new Map();
   const galleryByProduct = new Map();
   for (const image of imagesResult.results || []) {
     const mapped = mapImageRow(image);
     if (image.color_id == null) {
-      // Simple-product gallery image (not attached to any color).
+      // Product-level gallery image (simple / size-only products).
       const existing = galleryByProduct.get(image.product_id) || [];
       existing.push(mapped);
       galleryByProduct.set(image.product_id, existing);
@@ -175,11 +341,24 @@ export const listProducts = async (env, options = {}) => {
     imagesByColor.set(image.color_id, existing);
   }
 
-  // Simple products have exactly one stock row (color_id/size_id NULL).
-  const stockByProduct = new Map();
+  const colorStockByProduct = new Map();
+  const inventoryByProduct = new Map();
   for (const row of inventoryResult.results || []) {
-    if (row.color_id == null && !stockByProduct.has(row.product_id)) {
-      stockByProduct.set(row.product_id, toInt(row.stock));
+    const entry = {
+      colorId: row.color_id,
+      sizeId: row.size_id,
+      stock: toInt(row.stock),
+    };
+    const existing = inventoryByProduct.get(row.product_id) || [];
+    existing.push(entry);
+    inventoryByProduct.set(row.product_id, existing);
+
+    // Rows without a size carry product-level stock (NULL color) or
+    // per-color stock for color-only products.
+    if (row.size_id == null) {
+      const productStock = colorStockByProduct.get(row.product_id) || [];
+      productStock.push(entry);
+      colorStockByProduct.set(row.product_id, productStock);
     }
   }
 
@@ -193,41 +372,31 @@ export const listProducts = async (env, options = {}) => {
   const colorsByProduct = new Map();
   for (const color of colorsResult.results || []) {
     const existing = colorsByProduct.get(color.product_id) || [];
-    existing.push(
-      mapColorRow(
-        color,
-        imagesByColor.get(color.id) || [],
-        variantsByColor.get(color.id) || [],
-      ),
-    );
+    existing.push(color);
     colorsByProduct.set(color.product_id, existing);
   }
 
-  return (productsResult.results || []).map((product) => {
-    const isSimple = String(product.product_type || "variant") === "simple";
-    return {
-      id: product.id,
-      name: product.name,
-      slug: product.slug,
-      description: product.description,
-      price: product.price,
-      category: product.category,
-      featured: Boolean(product.featured),
-      active: Boolean(product.active),
-      productType: isSimple ? "simple" : "variant",
-      colors: isSimple ? [] : colorsByProduct.get(product.id) || [],
-      gallery: galleryByProduct.get(product.id) || [],
-      stock: isSimple ? (stockByProduct.get(product.id) ?? null) : null,
-    };
-  });
+  const context = {
+    colorsByProduct,
+    imagesByColor,
+    galleryByProduct,
+    variantsByColor,
+    inventoryByProduct,
+    sizeNamesById,
+    colorStockByProduct,
+  };
+
+  return (productsResult.results || []).map((product) =>
+    buildProductVariation(product, context),
+  );
 };
 
 const insertProductStatement = (db, product) =>
   db
     .prepare(
       `
-    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, variation_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
     )
     .bind(
@@ -240,6 +409,7 @@ const insertProductStatement = (db, product) =>
       product.featured ? 1 : 0,
       product.active ? 1 : 0,
       product.productType === "simple" ? "simple" : "variant",
+      product.variationType,
       product.createdAt,
       product.updatedAt,
     );
@@ -299,6 +469,21 @@ const insertVariantStatement = (db, productId, colorId, variant) =>
       variant.stock,
     );
 
+const addPreviewUrls = (product) => ({
+  ...product,
+  colors: (product.colors || []).map((color) => ({
+    ...color,
+    images: (color.images || []).map((image) => ({
+      ...image,
+      previewUrl: buildPreviewUrl(image.path),
+    })),
+  })),
+  gallery: (product.gallery || []).map((image) => ({
+    ...image,
+    previewUrl: buildPreviewUrl(image.path),
+  })),
+});
+
 export const createProduct = async (env, payload) => {
   if (!env?.DB) return normalizeProductPayload(payload);
   await ensureSchema(env);
@@ -306,10 +491,8 @@ export const createProduct = async (env, payload) => {
   const now = new Date().toISOString();
   const product = { ...normalized, createdAt: now, updatedAt: now };
 
-  // Simple products: one gallery (images with NULL color_id) and one
-  // inventory row (NULL color_id / NULL size_id). No colors, sizes, or
-  // variants are created.
-  if (product.productType === "simple") {
+  // ── none: one gallery + one stock figure, no colors or sizes ──────────
+  if (product.variationType === "none") {
     const statements = [insertProductStatement(env.DB, product)];
     for (const image of product.gallery || []) {
       statements.push(
@@ -325,13 +508,7 @@ export const createProduct = async (env, payload) => {
         .bind(`stock-${product.id}`, product.id, product.stock),
     );
     await env.DB.batch(statements);
-    return {
-      ...product,
-      gallery: (product.gallery || []).map((image) => ({
-        ...image,
-        previewUrl: buildPreviewUrl(image.path),
-      })),
-    };
+    return addPreviewUrls(product);
   }
 
   const statements = [insertProductStatement(env.DB, product)];
@@ -341,6 +518,64 @@ export const createProduct = async (env, payload) => {
     (sizeRows.results || []).map((row) => [row.name, row.id]),
   );
 
+  // `size` is either a color variant ({ size: "M", stock }) or a size-only
+  // entry ({ id, name, stock }); resolve the catalog row by its name.
+  const ensureSizeRow = (size) => {
+    const name = String(size.name || size.size || "").trim();
+    let sizeId = name ? sizeIds.get(name) : undefined;
+    if (!sizeId) {
+      sizeId = size.id || `size-${slugifyValue(name || "size")}`;
+      statements.push(
+        env.DB
+          .prepare("INSERT OR IGNORE INTO sizes (id, name) VALUES (?, ?)")
+          .bind(sizeId, name),
+      );
+      if (name) sizeIds.set(name, sizeId);
+    }
+    return sizeId;
+  };
+
+  // ── color: colors with one stock figure each (size stays NULL) ────────
+  if (product.variationType === "color") {
+    for (const color of product.colors) {
+      statements.push(insertColorStatement(env.DB, product.id, color, now));
+      for (const image of color.images || []) {
+        statements.push(
+          insertImageStatement(env.DB, product.id, color.id, image, now),
+        );
+      }
+      const stock = color.variants?.[0]?.stock ?? 0;
+      statements.push(
+        env.DB
+          .prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, ?, NULL, ?)`,
+          )
+          .bind(`inv-${product.id}-${color.id}`, product.id, color.id, stock),
+      );
+    }
+    await env.DB.batch(statements);
+    return addPreviewUrls(product);
+  }
+
+  // ── size: sizes with one stock figure each (color stays NULL) ─────────
+  if (product.variationType === "size") {
+    for (const size of product.sizes) {
+      const sizeId = ensureSizeRow(size);
+      statements.push(
+        env.DB
+          .prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, NULL, ?, ?)`,
+          )
+          .bind(`inv-${product.id}-${sizeId}`, product.id, sizeId, size.stock),
+      );
+    }
+    await env.DB.batch(statements);
+    return addPreviewUrls(product);
+  }
+
+  // ── color_size: per-color variants + inventory mirror (default) ───────
   for (const color of product.colors) {
     statements.push(insertColorStatement(env.DB, product.id, color, now));
     for (const image of color.images || []) {
@@ -352,19 +587,7 @@ export const createProduct = async (env, payload) => {
       statements.push(
         insertVariantStatement(env.DB, product.id, color.id, variant),
       );
-
-      let sizeId = sizeIds.get(variant.size);
-      if (!sizeId) {
-        sizeId = `size-${slugifyValue(variant.size)}`;
-        statements.push(
-          env.DB
-            .prepare(
-              "INSERT OR IGNORE INTO sizes (id, name) VALUES (?, ?)",
-            )
-            .bind(sizeId, variant.size),
-        );
-        sizeIds.set(variant.size, sizeId);
-      }
+      const sizeId = ensureSizeRow(variant);
       statements.push(
         env.DB
           .prepare(
@@ -383,16 +606,21 @@ export const createProduct = async (env, payload) => {
   }
 
   await env.DB.batch(statements);
-  return {
-    ...product,
-    colors: product.colors.map((color) => ({
-      ...color,
-      images: (color.images || []).map((image) => ({
-        ...image,
-        previewUrl: buildPreviewUrl(image.path),
-      })),
-    })),
-  };
+
+  // The response reflects the sizes the product actually uses (derived from
+  // the per-color variants, in canonical order).
+  const sizeNameSet = new Map();
+  for (const color of product.colors) {
+    for (const variant of color.variants || []) {
+      const name = String(variant.size || "").trim();
+      if (!name) continue;
+      sizeNameSet.set(name, {
+        id: sizeIds.get(name) || `size-${slugifyValue(name)}`,
+        name,
+      });
+    }
+  }
+  return addPreviewUrls({ ...product, sizes: sortSizes([...sizeNameSet.values()]) });
 };
 
 export const updateProduct = async (env, productId, payload) => {
@@ -470,7 +698,7 @@ export const getProductDetail = async (env, key) => {
     .first();
   if (!product) return null;
 
-  const [colorsResult, imagesResult, variantsResult, inventoryResult] =
+  const [colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
         "SELECT * FROM product_colors WHERE product_id = ? ORDER BY sort_order ASC, created_at DESC",
@@ -492,17 +720,22 @@ export const getProductDetail = async (env, key) => {
       )
         .bind(product.id)
         .all(),
+      env.DB.prepare("SELECT id, name FROM sizes").all(),
     ]);
 
-  const isSimple = String(product.product_type || "variant") === "simple";
+  const sizeNamesById = new Map(
+    (sizesResult.results || []).map((row) => [row.id, row.name]),
+  );
 
   const images = (imagesResult.results || []).map(mapImageRow);
   const imagesByColor = new Map();
-  const galleryImages = [];
+  const galleryByProduct = new Map();
   for (const image of images) {
     if (image.colorId == null) {
-      galleryImages.push(image);
-      continue; // gallery images belong to the product, not a color
+      const existing = galleryByProduct.get(product.id) || [];
+      existing.push(image);
+      galleryByProduct.set(product.id, existing);
+      continue;
     }
     const existing = imagesByColor.get(image.colorId) || [];
     existing.push(image);
@@ -516,74 +749,74 @@ export const getProductDetail = async (env, key) => {
     variantsByColor.set(variant.color_id, existing);
   }
 
-  const inventory = (inventoryResult.results || []).map((row) => ({
-    id: row.id,
-    productId: row.product_id,
-    colorId: row.color_id,
-    sizeId: row.size_id,
-    stock: row.stock,
-    size: null,
-  }));
+  const inventoryByProduct = new Map();
+  const colorStockByProduct = new Map();
+  for (const row of inventoryResult.results || []) {
+    const entry = {
+      id: row.id,
+      productId: row.product_id,
+      colorId: row.color_id,
+      sizeId: row.size_id,
+      stock: row.stock,
+      size: null,
+    };
+    const existing = inventoryByProduct.get(product.id) || [];
+    existing.push(entry);
+    inventoryByProduct.set(product.id, existing);
 
-  // Resolve size names only for variant rows (simple rows have NULL size_id).
-  const rowsWithSize = inventory.filter((entry) => entry.sizeId != null);
-  if (rowsWithSize.length) {
-    const sizeNamesById = new Map(
-      rowsWithSize.map((entry) => [entry.sizeId, ""]),
-    );
-    const sizeRows = await env.DB
-      .prepare(
-        `SELECT id, name FROM sizes WHERE id IN (${[...sizeNamesById.keys()]
-          .map(() => "?")
-          .join(",")})`,
-      )
-      .bind(...sizeNamesById.keys())
-      .all();
-    for (const row of sizeRows.results || []) {
-      sizeNamesById.set(row.id, row.name);
+    if (row.size_id == null) {
+      const productStock = colorStockByProduct.get(product.id) || [];
+      productStock.push(entry);
+      colorStockByProduct.set(product.id, productStock);
     }
-    for (const entry of rowsWithSize) {
+  }
+
+  // Resolve size names from the already-fetched catalog (the table is tiny,
+  // so no IN (...) query is needed).
+  for (const entry of inventoryByProduct.get(product.id) || []) {
+    if (entry.sizeId != null) {
       entry.size = sizeNamesById.get(entry.sizeId) || entry.sizeId;
     }
   }
 
-  const colors = isSimple
-    ? []
-    : (colorsResult.results || []).map((color) =>
-        mapColorRow(
-          color,
-          imagesByColor.get(color.id) || [],
-          variantsByColor.get(color.id) || [],
-        ),
-      );
+  const colorsByProduct = new Map();
+  colorsByProduct.set(
+    product.id,
+    (colorsResult.results || []).map((color) => color),
+  );
 
-  const gallery = isSimple ? galleryImages : [];
-  const stockRow = isSimple
-    ? inventory.find((entry) => entry.colorId == null && entry.sizeId == null)
-    : null;
+  const built = buildProductVariation(product, {
+    colorsByProduct,
+    imagesByColor,
+    galleryByProduct,
+    variantsByColor,
+    inventoryByProduct,
+    sizeNamesById,
+    colorStockByProduct,
+  });
 
   const thumbnail =
     images.find((image) => image.isPrimary)?.previewUrl || images[0]?.previewUrl || "";
 
   return {
     product: {
-      id: product.id,
-      name: product.name,
-      slug: product.slug,
-      description: product.description,
-      price: product.price,
-      category: product.category,
-      featured: Boolean(product.featured),
-      active: Boolean(product.active),
-      productType: isSimple ? "simple" : "variant",
+      id: built.id,
+      name: built.name,
+      slug: built.slug,
+      description: built.description,
+      price: built.price,
+      category: built.category,
+      featured: built.featured,
+      active: built.active,
+      variationType: built.variationType,
+      productType: built.productType,
     },
-    colors,
+    colors: built.colors,
+    sizes: built.sizes,
     images,
-    gallery,
-    stock: stockRow ? stockRow.stock : null,
-    inventory,
+    gallery: built.gallery,
+    stock: built.stock,
+    inventory: inventoryByProduct.get(product.id) || [],
     thumbnail,
   };
 };
-
-

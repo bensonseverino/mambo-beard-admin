@@ -123,3 +123,77 @@ test("updateInventoryStock updates the inventory row and its variant mirror", as
     (error) => error.code === "INVALID_STOCK" && error.status === 400,
   );
 });
+
+test("listInventory groups color-only products with one stock row per color", async () => {
+  const env = await makeEnv();
+  await createProduct(env, {
+    id: "prod-cap",
+    name: "Mambo Cap",
+    slug: "mambo-cap",
+    price: 15,
+    category: "Accessories",
+    variationType: "color",
+    colors: [
+      { id: "color-black", name: "Black", hex: "#000000", images: [], variants: [{ size: null, stock: 10 }] },
+      { id: "color-cream", name: "Cream", hex: "#F2E8D5", images: [], variants: [{ size: null, stock: 2 }] },
+    ],
+  });
+
+  const inventory = await listInventory(env);
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].variationType, "color");
+  assert.equal(inventory[0].colors.length, 2);
+  const black = inventory[0].colors.find((color) => color.colorName === "Black");
+  assert.equal(black.rows.length, 1);
+  assert.equal(black.rows[0].size, null);
+  assert.equal(black.rows[0].stock, 10);
+});
+
+test("listInventory groups size-only products under one Sizes group", async () => {
+  const env = await makeEnv();
+  await createProduct(env, {
+    id: "prod-tshirt",
+    name: "Mambo T-Shirt",
+    slug: "mambo-t-shirt",
+    price: 25,
+    category: "Apparel",
+    variationType: "size",
+    sizes: [
+      { id: "size-s", name: "S", stock: 4 },
+      { id: "size-xxl", name: "XXL", stock: 3 },
+    ],
+  });
+
+  const inventory = await listInventory(env);
+  assert.equal(inventory.length, 1);
+  assert.equal(inventory[0].variationType, "size");
+  assert.equal(inventory[0].colors.length, 1);
+  const group = inventory[0].colors[0];
+  assert.equal(group.colorName, "Sizes");
+  assert.equal(group.colorId, null);
+  const sizes = group.rows.map((row) => row.size).sort();
+  assert.deepEqual(sizes, ["S", "XXL"]);
+  const xxl = group.rows.find((row) => row.size === "XXL");
+  assert.equal(xxl.stock, 3);
+});
+
+test("updateInventoryStock updates a size-only stock row without a variant mirror", async () => {
+  const env = await makeEnv();
+  await createProduct(env, {
+    id: "prod-tshirt",
+    name: "Mambo T-Shirt",
+    slug: "mambo-t-shirt",
+    price: 25,
+    category: "Apparel",
+    variationType: "size",
+    sizes: [{ id: "size-xxl", name: "XXL", stock: 3 }],
+  });
+
+  const inventory = await listInventory(env);
+  const rowId = inventory[0].colors[0].rows[0].id;
+  const updated = await updateInventoryStock(env, rowId, 8);
+  assert.equal(updated.stock, 8);
+  assert.equal(env.DB._rows("inventory")[0].stock, 8);
+  // Size-only products have no product_variants rows to mirror into.
+  assert.equal(env.DB._rows("product_variants").length, 0);
+});

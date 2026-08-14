@@ -4,6 +4,11 @@
 // single D1 batch, which runs atomically. Deductions use guarded UPDATEs
 // (WHERE ... stock >= ?) so stock can never go negative.
 
+import {
+  hasColorVariation,
+  hasSizeVariation,
+  VARIATION_TYPES,
+} from "./products-db.js";
 import { apiError, ensureSchema, requireDb } from "./schema.js";
 
 const slugifyValue = (value) =>
@@ -42,17 +47,21 @@ const mergeCartItems = (items) => {
   const merged = new Map();
   for (const item of items) {
     const productKey =
-      item.productId || item.slug || (item.product?.id ? item.product.id : "");
+      item.productId ||
+      item.product_id ||
+      item.slug ||
+      (item.product?.id ? item.product.id : "");
     if (!productKey) {
       throw apiError(
         "INVALID_PAYLOAD",
         "Every cart item needs a product.",
       );
     }
-    // Simple products carry no color/size; variant products carry both.
-    // Missing values are validated per product type later.
-    const colorId = item.colorId || "";
-    const size = String(item.size || "").trim();
+    // Which variations apply is validated per product later; the cart key
+    // just needs to distinguish every variation combination so different
+    // color/size picks never merge into one line.
+    const colorId = String(item.colorId || item.color_id || "");
+    const size = String(item.size || item.sizeId || item.size_id || "").trim();
     const quantity = Math.max(1, toInt(item.quantity, 1));
     const key = `${productKey}|${colorId}|${size}`;
     const existing = merged.get(key);
@@ -116,65 +125,119 @@ export const createOrder = async (env, payload) => {
       );
     }
 
-    const isSimple = String(product.product_type || "variant") === "simple";
-    let size = null;
+    const variationType = VARIATION_TYPES.includes(product.variation_type)
+      ? product.variation_type
+      : String(product.product_type || "variant") === "simple"
+        ? "none"
+        : "color_size";
+    const color = hasColorVariation(variationType);
+    const size = hasSizeVariation(variationType);
+
+    const colorId = String(item.colorId || "");
+    const sizeKey = String(item.size || "").trim();
+
+    // Reject variation values the product does not support (server-side
+    // validation — never trust the storefront).
+    if (colorId && !color) {
+      throw apiError(
+        "INVALID_VARIATION",
+        `This product does not support color variations`,
+        400,
+      );
+    }
+    if (sizeKey && !size) {
+      throw apiError(
+        "INVALID_VARIATION",
+        `This product does not support size variations`,
+        400,
+      );
+    }
+
+    let sizeRow = null;
+    let colorRow = null;
     let inventoryRow;
     let variant = null;
 
-    if (isSimple) {
-      // Simple products: colors/sizes are ignored. Validate the single
-      // stock row (product → stock).
+    if (variationType === "none") {
+      // Simple products: validate the single product-level stock row.
       inventoryRow = await env.DB.prepare(
         "SELECT * FROM inventory WHERE product_id = ? AND color_id IS NULL AND size_id IS NULL",
       )
         .bind(product.id)
         .first();
     } else {
-      const color = await env.DB.prepare(
-        "SELECT * FROM product_colors WHERE id = ? AND product_id = ?",
-      )
-        .bind(item.colorId, product.id)
-        .first();
-      if (!color) {
-        throw apiError(
-          "COLOR_NOT_FOUND",
-          `Color not found for product "${product.name}".`,
-        );
-      }
-      if (!item.size) {
-        throw apiError(
-          "INVALID_PAYLOAD",
-          `Size is required for product "${product.name}".`,
-        );
+      if (color) {
+        colorRow = await env.DB.prepare(
+          "SELECT * FROM product_colors WHERE id = ? AND product_id = ?",
+        )
+          .bind(colorId, product.id)
+          .first();
+        if (!colorRow) {
+          throw apiError(
+            "COLOR_NOT_FOUND",
+            `Color not found for product "${product.name}".`,
+          );
+        }
       }
 
-      size = await env.DB.prepare(
-        "SELECT * FROM sizes WHERE name = ?",
-      )
-        .bind(item.size)
-        .first();
+      if (size) {
+        if (!sizeKey) {
+          throw apiError(
+            "INVALID_PAYLOAD",
+            `Size is required for product "${product.name}".`,
+          );
+        }
+        // Accept either the size name ("XXL") or the catalog id ("size-xxl").
+        sizeRow = await env.DB.prepare(
+          "SELECT * FROM sizes WHERE id = ? OR name = ?",
+        )
+          .bind(sizeKey, sizeKey)
+          .first();
+      }
+
+      if (color && size) {
+        inventoryRow = await env.DB.prepare(
+          "SELECT * FROM inventory WHERE product_id = ? AND color_id = ? AND size_id = ?",
+        )
+          .bind(product.id, colorId, sizeRow?.id || "")
+          .first();
+      } else if (color) {
+        inventoryRow = await env.DB.prepare(
+          "SELECT * FROM inventory WHERE product_id = ? AND color_id = ? AND size_id IS NULL",
+        )
+          .bind(product.id, colorId)
+          .first();
+      } else {
+        inventoryRow = await env.DB.prepare(
+          "SELECT * FROM inventory WHERE product_id = ? AND color_id IS NULL AND size_id = ?",
+        )
+          .bind(product.id, sizeRow?.id || "")
+          .first();
+      }
 
       // Fall back to product_variants stock when the inventory mirror is
-      // missing (e.g. products created before inventory sync shipped).
-      inventoryRow = await env.DB.prepare(
-        "SELECT * FROM inventory WHERE product_id = ? AND color_id = ? AND size_id = ?",
-      )
-        .bind(product.id, item.colorId, size?.id || "")
-        .first();
-      variant = await env.DB.prepare(
-        "SELECT * FROM product_variants WHERE product_id = ? AND color_id = ? AND size = ?",
-      )
-        .bind(product.id, item.colorId, item.size)
-        .first();
+      // missing (e.g. products created before inventory sync shipped). Only
+      // color_size products maintain that mirror.
+      if (variationType === "color_size") {
+        variant = await env.DB.prepare(
+          "SELECT * FROM product_variants WHERE product_id = ? AND color_id = ? AND size = ?",
+        )
+          .bind(product.id, colorId, sizeRow?.name || sizeKey)
+          .first();
+      }
     }
 
     const stock = inventoryRow ? inventoryRow.stock : variant?.stock ?? 0;
     if (stock < item.quantity) {
+      const detail =
+        variationType === "none"
+          ? `${product.name}`
+          : variationType === "color"
+            ? `${product.name} (${colorRow?.name || colorId})`
+            : `${product.name} (${sizeRow?.name || sizeKey})`;
       throw apiError(
         "INSUFFICIENT_STOCK",
-        isSimple
-          ? `Insufficient stock for ${product.name}. Only ${stock} left.`
-          : `Insufficient stock for ${product.name} (${item.size}). Only ${stock} left.`,
+        `Insufficient stock for ${detail}. Only ${stock} left.`,
       );
     }
 
@@ -185,13 +248,13 @@ export const createOrder = async (env, payload) => {
     validated.push({
       ...item,
       productId: product.id,
-      isSimple,
-      colorId: isSimple ? null : item.colorId,
-      size: isSimple ? "" : item.size,
-      sizeId: isSimple ? null : size?.id || `size-${slugifyValue(item.size)}`,
+      variationType,
+      colorId: color ? colorId : null,
+      size: size ? sizeRow?.name || sizeKey : "",
+      sizeId: size ? sizeRow?.id || `size-${slugifyValue(sizeKey)}` : null,
       price,
       stock,
-      sizeMissing: !isSimple && !size,
+      sizeMissing: size && !sizeRow,
       inventoryMissing: !inventoryRow,
     });
   }
@@ -253,19 +316,15 @@ export const createOrder = async (env, payload) => {
   ];
 
   for (const item of validated) {
-    if (item.isSimple) {
+    const itemId = `item-${orderId}-${Math.random().toString(36).slice(2, 8)}`;
+
+    if (item.variationType === "none") {
       // Simple product line: color_id / size_id stay NULL.
       statements.push(
         env.DB.prepare(
           `INSERT INTO order_items (id, order_id, product_id, color_id, size, size_id, quantity, price)
            VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)`,
-        ).bind(
-          `item-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
-          orderId,
-          item.productId,
-          item.quantity,
-          item.price,
-        ),
+        ).bind(itemId, orderId, item.productId, item.quantity, item.price),
       );
 
       // Make sure the single stock row exists for legacy simple products.
@@ -287,7 +346,7 @@ export const createOrder = async (env, payload) => {
       continue;
     }
 
-    // Ensure the size row exists for legacy data.
+    // Ensure the size row exists for legacy data (size / color_size only).
     if (item.sizeMissing) {
       statements.push(
         env.DB
@@ -296,12 +355,83 @@ export const createOrder = async (env, payload) => {
       );
     }
 
+    if (item.variationType === "color") {
+      // Color-only line: size stays NULL.
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO order_items (id, order_id, product_id, color_id, size, size_id, quantity, price)
+           VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)`,
+        ).bind(itemId, orderId, item.productId, item.colorId, item.quantity, item.price),
+      );
+
+      if (item.inventoryMissing) {
+        statements.push(
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, ?, NULL, ?)`,
+          ).bind(
+            `inv-${item.productId}-${item.colorId}`,
+            item.productId,
+            item.colorId,
+            item.stock,
+          ),
+        );
+      }
+
+      statements.push(
+        env.DB.prepare(
+          `UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND color_id = ? AND size_id IS NULL AND stock >= ?`,
+        ).bind(item.quantity, item.productId, item.colorId, item.quantity),
+      );
+      continue;
+    }
+
+    if (item.variationType === "size") {
+      // Size-only line: color stays NULL.
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO order_items (id, order_id, product_id, color_id, size, size_id, quantity, price)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+        ).bind(
+          itemId,
+          orderId,
+          item.productId,
+          item.size,
+          item.sizeId,
+          item.quantity,
+          item.price,
+        ),
+      );
+
+      if (item.inventoryMissing) {
+        statements.push(
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO inventory (id, product_id, color_id, size_id, stock)
+             VALUES (?, ?, NULL, ?, ?)`,
+          ).bind(
+            `inv-${item.productId}-${item.sizeId}`,
+            item.productId,
+            item.sizeId,
+            item.stock,
+          ),
+        );
+      }
+
+      statements.push(
+        env.DB.prepare(
+          `UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND color_id IS NULL AND size_id = ? AND stock >= ?`,
+        ).bind(item.quantity, item.productId, item.sizeId, item.quantity),
+      );
+      continue;
+    }
+
+    // color_size (default): both dimensions on the order line.
     statements.push(
       env.DB.prepare(
         `INSERT INTO order_items (id, order_id, product_id, color_id, size, size_id, quantity, price)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
-        `item-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
+        itemId,
         orderId,
         item.productId,
         item.colorId,

@@ -96,7 +96,61 @@ const apiFetch = async (path, options = {}) => {
 
 const REFRESH_INTERVAL_MS = 45000;
 
-const sizeOptions = ["XS", "S", "M", "L", "XL"];
+// Per-product variation configuration. The admin dashboard is the source of
+// truth; the storefront renders only the selectors that apply to each value.
+const VARIATION_OPTIONS = [
+  {
+    value: "none",
+    label: "No variations",
+    description: "One price and a single stock quantity. No selectors.",
+    badge: "bg-sky-500/15 text-sky-300",
+  },
+  {
+    value: "color",
+    label: "Color only",
+    description: "Customers pick a color. No size selector.",
+    badge: "bg-emerald-500/15 text-emerald-300",
+  },
+  {
+    value: "size",
+    label: "Size only",
+    description: "Customers pick a size (S–XXL). No color selector.",
+    badge: "bg-violet-500/15 text-violet-300",
+  },
+  {
+    value: "color_size",
+    label: "Color + Size",
+    description: "Customers pick both a color and a size.",
+    badge: "bg-amber-500/15 text-amber-300",
+  },
+];
+
+const variationLabel = (value) =>
+  VARIATION_OPTIONS.find((option) => option.value === value)?.label ||
+  value ||
+  "Color + Size";
+
+const variationBadge = (value) =>
+  VARIATION_OPTIONS.find((option) => option.value === value)?.badge ||
+  "bg-amber-500/15 text-amber-300";
+
+const hasColorVariation = (type) => type === "color" || type === "color_size";
+const hasSizeVariation = (type) => type === "size" || type === "color_size";
+
+const resolveVariationType = (product) =>
+  VARIATION_OPTIONS.some((option) => option.value === product?.variationType)
+    ? product.variationType
+    : product?.productType === "simple"
+      ? "none"
+      : "color_size";
+
+// Fallback size catalog used when /api/sizes is unavailable. The live
+// catalog comes from the API so new sizes need no code changes.
+const FALLBACK_SIZE_NAMES = ["S", "M", "L", "XL", "XXL"];
+const FALLBACK_SIZE_CATALOG = FALLBACK_SIZE_NAMES.map((name) => ({
+  id: `size-${name.toLowerCase()}`,
+  name,
+}));
 
 // Pseudo key for the simple-product gallery upload queue (there are no
 // colors, so images are tracked against the product itself).
@@ -113,7 +167,7 @@ const createSeedState = () => ({
       category: "Care",
       featured: true,
       active: true,
-      productType: "variant",
+      variationType: "color_size",
       colors: [
         {
           id: "color-1",
@@ -124,13 +178,20 @@ const createSeedState = () => ({
             "https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=800&q=80",
           ],
           variants: [
-            { size: "XS", stock: 4 },
-            { size: "S", stock: 10 },
-            { size: "M", stock: 8 },
-            { size: "L", stock: 2 },
-            { size: "XL", stock: 0 },
+            { size: "S", stock: 4 },
+            { size: "M", stock: 10 },
+            { size: "L", stock: 8 },
+            { size: "XL", stock: 2 },
+            { size: "XXL", stock: 0 },
           ],
         },
+      ],
+      sizes: [
+        { id: "size-s", name: "S" },
+        { id: "size-m", name: "M" },
+        { id: "size-l", name: "L" },
+        { id: "size-xl", name: "XL" },
+        { id: "size-xxl", name: "XXL" },
       ],
     },
     {
@@ -142,7 +203,7 @@ const createSeedState = () => ({
       category: "Tools",
       featured: false,
       active: true,
-      productType: "variant",
+      variationType: "color_size",
       colors: [
         {
           id: "color-2",
@@ -153,13 +214,20 @@ const createSeedState = () => ({
             "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=800&q=80",
           ],
           variants: [
-            { size: "XS", stock: 2 },
-            { size: "S", stock: 6 },
-            { size: "M", stock: 7 },
-            { size: "L", stock: 4 },
-            { size: "XL", stock: 3 },
+            { size: "S", stock: 2 },
+            { size: "M", stock: 6 },
+            { size: "L", stock: 7 },
+            { size: "XL", stock: 4 },
+            { size: "XXL", stock: 3 },
           ],
         },
+      ],
+      sizes: [
+        { id: "size-s", name: "S" },
+        { id: "size-m", name: "M" },
+        { id: "size-l", name: "L" },
+        { id: "size-xl", name: "XL" },
+        { id: "size-xxl", name: "XXL" },
       ],
     },
   ],
@@ -259,26 +327,32 @@ const normalizeColorImages = (images) => {
   });
 };
 
-const createColorTemplate = (index) => ({
+const createColorTemplate = (index, sizes = FALLBACK_SIZE_NAMES) => ({
   id: `color-${Date.now()}-${index}`,
   name: `Color ${index + 1}`,
   hex: "#111827",
   sortOrder: index + 1,
   images: [],
-  variants: sizeOptions.map((size) => ({ size, stock: 0 })),
+  // Empty sizes means a color-only product: one stock figure per color.
+  variants: sizes.length
+    ? sizes.map((size) => ({ size, stock: 0 }))
+    : [{ size: null, stock: 0 }],
 });
 
 const getProductValidation = (product) => {
   const errors = [];
+  const variationType = resolveVariationType(product);
+  const hasColor = hasColorVariation(variationType);
+  const hasSize = hasSizeVariation(variationType);
+
   if (!product.name?.trim()) errors.push("Add a product name.");
   if (!product.slug?.trim()) errors.push("Add a slug.");
   if (!product.price || Number(product.price) <= 0) {
     errors.push("Enter a price greater than zero.");
   }
 
-  // Simple products only need a stock quantity and a gallery; colors,
-  // sizes, and the variant inventory matrix do not apply.
-  if ((product.productType || "variant") === "simple") {
+  // No variations: only a stock quantity and a color-less gallery apply.
+  if (variationType === "none") {
     const stock = Number(product.stock);
     if (!Number.isFinite(stock) || stock < 0) {
       errors.push("Enter a valid stock quantity.");
@@ -292,25 +366,56 @@ const getProductValidation = (product) => {
     return errors;
   }
 
-  if (!product.colors?.length) errors.push("Add at least one color.");
-  product.colors?.forEach((color, index) => {
-    if (!color.name?.trim()) {
-      errors.push(`Color ${index + 1} needs a name.`);
-    }
-    const images = normalizeColorImages(color.images);
-    if (!images.length) {
-      errors.push(`Color ${index + 1} needs at least one uploaded image.`);
-    } else if (!images.some((image) => image.isPrimary)) {
-      errors.push(`Color ${index + 1} needs a primary image.`);
-    }
-    const hasInventory = color.variants?.every((variant) => {
-      const stock = Number(variant.stock);
-      return Number.isFinite(stock) && stock >= 0;
+  if (hasColor) {
+    if (!product.colors?.length) errors.push("Add at least one color.");
+    product.colors?.forEach((color, index) => {
+      if (!color.name?.trim()) {
+        errors.push(`Color ${index + 1} needs a name.`);
+      }
+      const images = normalizeColorImages(color.images);
+      if (!images.length) {
+        errors.push(`Color ${index + 1} needs at least one uploaded image.`);
+      } else if (!images.some((image) => image.isPrimary)) {
+        errors.push(`Color ${index + 1} needs a primary image.`);
+      }
+      if (variationType === "color_size") {
+        if (!color.variants?.length) {
+          errors.push(`Color ${index + 1} needs at least one size selected.`);
+        }
+        const hasInventory = color.variants?.every((variant) => {
+          const stock = Number(variant.stock);
+          return Number.isFinite(stock) && stock >= 0;
+        });
+        if (!hasInventory) {
+          errors.push(
+            `Color ${index + 1} needs inventory values for every size.`,
+          );
+        }
+      } else {
+        const stock = Number(color.variants?.[0]?.stock);
+        if (!Number.isFinite(stock) || stock < 0) {
+          errors.push(`Color ${index + 1} needs a valid stock quantity.`);
+        }
+      }
     });
-    if (!hasInventory) {
-      errors.push(`Color ${index + 1} needs inventory values for every size.`);
+  }
+
+  if (hasSize) {
+    const activeSizes = (product.sizes || []).filter(
+      (size) => size.enabled !== false,
+    );
+    if (!activeSizes.length) {
+      errors.push("Select at least one size.");
     }
-  });
+    if (variationType === "size") {
+      activeSizes.forEach((size) => {
+        const stock = Number(size.stock);
+        if (!Number.isFinite(stock) || stock < 0) {
+          errors.push(`Size ${size.name || ""} needs a valid stock quantity.`);
+        }
+      });
+    }
+  }
   return errors;
 };
 
@@ -784,18 +889,53 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     category: "Care",
     featured: false,
     active: true,
-    productType: "variant",
+    variationType: "color_size",
     colors: [],
+    sizes: [],
     gallery: [],
     stock: "",
   });
   const [uploadQueues, setUploadQueues] = useState({});
   const [typeFilter, setTypeFilter] = useState("all");
+  const [sizeCatalog, setSizeCatalog] = useState(FALLBACK_SIZE_CATALOG);
+
+  // Load the size catalog from the API so new sizes need no code changes.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch("/api/sizes")
+      .then((payload) => {
+        if (!cancelled && Array.isArray(payload.data) && payload.data.length) {
+          setSizeCatalog(payload.data);
+        }
+      })
+      .catch(() => {
+        // Fall back to the standard S–XXL catalog.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const variationType = resolveVariationType(draft);
+  const hasColor = hasColorVariation(variationType);
+  const hasSize = hasSizeVariation(variationType);
+
+  // The sizes the draft currently tracks; when none are tracked yet, every
+  // catalog size is assumed enabled so the form starts fully unchecked-free.
+  const activeSizes = useMemo(() => {
+    if (draft.sizes?.length) return draft.sizes;
+    return sizeCatalog.map((size) => ({
+      id: size.id,
+      name: size.name,
+      enabled: true,
+      stock: 0,
+    }));
+  }, [draft.sizes, sizeCatalog]);
 
   const visibleProducts = useMemo(() => {
     if (typeFilter === "all") return state.products;
     return state.products.filter(
-      (product) => (product.productType || "variant") === typeFilter,
+      (product) => resolveVariationType(product) === typeFilter,
     );
   }, [state.products, typeFilter]);
 
@@ -807,28 +947,70 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
 
   const saveProduct = async (event) => {
     event.preventDefault();
-    const isSimple = draft.productType === "simple";
+    const selectedSizes = activeSizes.filter((size) => size.enabled !== false);
     const normalized = {
       ...draft,
       id: draft.id || `prod-${Date.now()}`,
       slug: slugifyValue(draft.slug || draft.name),
       price: Number(draft.price) || 0,
-      productType: isSimple ? "simple" : "variant",
-      stock: isSimple ? Math.max(0, Number(draft.stock) || 0) : undefined,
-      gallery: isSimple ? normalizeColorImages(draft.gallery) : undefined,
-      colors: isSimple
-        ? []
-        : draft.colors.length
+      variationType,
+      stock:
+        variationType === "none"
+          ? Math.max(0, Number(draft.stock) || 0)
+          : undefined,
+      gallery: !hasColor ? normalizeColorImages(draft.gallery) : undefined,
+      sizes: hasSize
+        ? selectedSizes.map((size) => ({
+            id: size.id,
+            name: size.name,
+            stock:
+              variationType === "size" ? Number(size.stock) || 0 : undefined,
+          }))
+        : [],
+      colors: hasColor
+        ? draft.colors.length
           ? draft.colors.map((color) => ({
               ...color,
               images: normalizeColorImages(color.images),
-              variants: color.variants?.map((variant) => ({
-                ...variant,
-                stock: Number(variant.stock) || 0,
-              })),
+              variants:
+                variationType === "color"
+                  ? [
+                      {
+                        size: null,
+                        stock: Math.max(
+                          0,
+                          Number(color.variants?.[0]?.stock) || 0,
+                        ),
+                      },
+                    ]
+                  : (color.variants || []).map((variant) => ({
+                      ...variant,
+                      stock: Number(variant.stock) || 0,
+                    })),
             }))
-          : [createColorTemplate(0)],
+          : [
+              createColorTemplate(
+                0,
+                variationType === "color_size"
+                  ? selectedSizes.map((size) => size.name)
+                  : [],
+              ),
+            ]
+        : [],
     };
+
+    // Changing the variation type of an existing product can orphan or
+    // reinterpret inventory — warn before rebuilding it.
+    if (draft.id) {
+      const existing = state.products.find((product) => product.id === draft.id);
+      const existingType = existing ? resolveVariationType(existing) : null;
+      if (existingType && existingType !== variationType) {
+        const confirmed = window.confirm(
+          "Changing the variation type may affect existing inventory data. Continue?",
+        );
+        if (!confirmed) return;
+      }
+    }
 
     try {
       const token = localStorage.getItem("mambo-admin-token") || "";
@@ -865,14 +1047,160 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         category: "Care",
         featured: false,
         active: true,
-        productType: "variant",
+        variationType: "color_size",
         colors: [],
+        sizes: [],
         gallery: [],
         stock: "",
       });
     } catch (error) {
       console.error("Unable to save product", error);
     }
+  };
+
+  const changeVariationType = (nextType) => {
+    setDraft((current) => {
+      const currentType = resolveVariationType(current);
+      if (currentType === nextType) return current;
+
+      const nextHasColor = hasColorVariation(nextType);
+      const nextHasSize = hasSizeVariation(nextType);
+      const currentHasColor = hasColorVariation(currentType);
+
+      let colors = current.colors || [];
+      let gallery = normalizeColorImages(current.gallery);
+
+      // Leaving a color mode: flatten every color's images into the gallery
+      // so no uploads are orphaned by the rebuild.
+      if (currentHasColor && !nextHasColor) {
+        const flattened = (current.colors || []).flatMap((color) =>
+          normalizeColorImages(color.images),
+        );
+        gallery = gallery.length ? gallery : flattened;
+        colors = [];
+      }
+
+      // color_size → color: collapse the matrix into one stock per color.
+      if (currentType === "color_size" && nextType === "color") {
+        colors = colors.map((color) => ({
+          ...color,
+          variants: [
+            {
+              size: null,
+              stock: color.variants?.[0]?.stock ?? 0,
+            },
+          ],
+        }));
+      }
+
+      // color → color_size: expand one stock per color into every size.
+      if (currentType === "color" && nextType === "color_size") {
+        const sizeNames = current.sizes?.length
+          ? current.sizes
+              .filter((size) => size.enabled !== false)
+              .map((size) => size.name)
+          : FALLBACK_SIZE_NAMES;
+        colors = colors.map((color) => ({
+          ...color,
+          variants: sizeNames.map((name) => ({
+            size: name,
+            stock: color.variants?.[0]?.stock ?? 0,
+          })),
+        }));
+      }
+
+      // Entering a color mode from none: move the gallery into the first
+      // color so assets stay attached.
+      if (!currentHasColor && nextHasColor) {
+        if (
+          gallery.length &&
+          !colors.some((color) =>
+            normalizeColorImages(color.images).length,
+          )
+        ) {
+          if (!colors.length) {
+            colors = [
+              {
+                ...createColorTemplate(0, nextType === "color_size" ? FALLBACK_SIZE_NAMES : []),
+                images: gallery,
+              },
+            ];
+          } else {
+            colors = colors.map((color, index) =>
+              index === 0 ? { ...color, images: gallery } : color,
+            );
+          }
+        }
+        gallery = [];
+      }
+
+      let sizes = current.sizes || [];
+      if (nextHasSize && !sizes.length) {
+        sizes = sizeCatalog.map((size) => ({
+          id: size.id,
+          name: size.name,
+          enabled: true,
+          stock: 0,
+        }));
+      }
+      if (!nextHasSize) {
+        sizes = [];
+      }
+
+      return {
+        ...current,
+        variationType: nextType,
+        colors,
+        sizes,
+        gallery,
+      };
+    });
+  };
+
+  const toggleSize = (size) => {
+    setDraft((current) => {
+      const currentActive = current.sizes?.length ? current.sizes : activeSizes;
+      const isEnabled = currentActive.some(
+        (entry) => entry.id === size.id && entry.enabled !== false,
+      );
+      const nextSizes = currentActive.map((entry) =>
+        entry.id === size.id
+          ? { ...entry, enabled: !isEnabled }
+          : entry,
+      );
+
+      if (current.variationType === "color_size") {
+        // Keep every color's inventory matrix in sync with the selection.
+        const colors = (current.colors || []).map((color) => ({
+          ...color,
+          variants: isEnabled
+            ? (color.variants || []).filter(
+                (variant) => variant.size !== size.name,
+              )
+            : [
+                ...(color.variants || []),
+                { size: size.name, stock: 0 },
+              ],
+        }));
+        return { ...current, sizes: nextSizes, colors };
+      }
+
+      return { ...current, sizes: nextSizes };
+    });
+  };
+
+  const updateSizeStock = (sizeId, nextStock) => {
+    setDraft((current) => {
+      const currentActive = current.sizes?.length ? current.sizes : activeSizes;
+      return {
+        ...current,
+        sizes: currentActive.map((entry) =>
+          entry.id === sizeId
+            ? { ...entry, stock: Number(nextStock) || 0 }
+            : entry,
+        ),
+      };
+    });
   };
 
   const removeProduct = async (productId) => {
@@ -939,10 +1267,22 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   };
 
   const addColor = () => {
-    setDraft((current) => ({
-      ...current,
-      colors: [...current.colors, createColorTemplate(current.colors.length)],
-    }));
+    setDraft((current) => {
+      const currentType = resolveVariationType(current);
+      const sizeNames = hasSizeVariation(currentType)
+        ? (current.sizes?.length
+            ? current.sizes.filter((size) => size.enabled !== false)
+            : sizeCatalog.map((size) => ({ ...size, enabled: true }))
+          ).map((size) => size.name)
+        : [];
+      return {
+        ...current,
+        colors: [
+          ...current.colors,
+          createColorTemplate(current.colors.length, sizeNames),
+        ],
+      };
+    });
   };
 
   const removeColor = (colorId) => {
@@ -964,6 +1304,20 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                   ? { ...variant, stock: Number(nextStock) || 0 }
                   : variant,
               ),
+            }
+          : color,
+      ),
+    }));
+  };
+
+  const updateColorStock = (colorId, nextStock) => {
+    setDraft((current) => ({
+      ...current,
+      colors: current.colors.map((color) =>
+        color.id === colorId
+          ? {
+              ...color,
+              variants: [{ size: null, stock: Number(nextStock) || 0 }],
             }
           : color,
       ),
@@ -1301,94 +1655,40 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         </div>
         <form onSubmit={saveProduct} className="mt-6 grid gap-4 lg:grid-cols-2">
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-            <h3 className="text-lg font-semibold text-white">Product Type</h3>
+            <h3 className="text-lg font-semibold text-white">
+              Product Variations
+            </h3>
             <p className="mt-1 text-sm text-slate-400">
-              Choose how this product is sold.
+              How can customers choose this product? Only the options below
+              appear on the storefront.
             </p>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label
-                className={`cursor-pointer rounded-2xl border p-4 transition ${
-                  draft.productType !== "simple"
-                    ? "border-amber-400/40 bg-amber-500/10"
-                    : "border-white/10 bg-slate-900/70 hover:border-white/25"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="product-type"
-                  className="sr-only"
-                  checked={draft.productType !== "simple"}
-                  onChange={() =>
-                    setDraft((current) => {
-                      // simple → variant: carry gallery images into the first
-                      // color so no assets are orphaned by the rebuild.
-                      const galleryImages = normalizeColorImages(current.gallery);
-                      const hasColorImages = (current.colors || []).some(
-                        (color) => normalizeColorImages(color.images).length,
-                      );
-                      return {
-                        ...current,
-                        productType: "variant",
-                        colors:
-                          hasColorImages || !galleryImages.length
-                            ? current.colors
-                            : current.colors.map((color, index) =>
-                                index === 0
-                                  ? { ...color, images: galleryImages }
-                                  : color,
-                              ),
-                      };
-                    })
-                  }
-                />
-                <span className="block">
-                  <span className="font-semibold text-white">
-                    Variant Product
+              {VARIATION_OPTIONS.map((option) => (
+                <label
+                  key={option.value}
+                  className={`cursor-pointer rounded-2xl border p-4 transition ${
+                    variationType === option.value
+                      ? "border-amber-400/40 bg-amber-500/10"
+                      : "border-white/10 bg-slate-900/70 hover:border-white/25"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="variation-type"
+                    className="sr-only"
+                    checked={variationType === option.value}
+                    onChange={() => changeVariationType(option.value)}
+                  />
+                  <span className="block">
+                    <span className="font-semibold text-white">
+                      {option.label}
+                    </span>
+                    <span className="mt-1 block text-sm text-slate-400">
+                      {option.description}
+                    </span>
                   </span>
-                  <span className="mt-1 block text-sm text-slate-400">
-                    Colors, sizes, and per-variant inventory. Best for apparel.
-                  </span>
-                </span>
-              </label>
-              <label
-                className={`cursor-pointer rounded-2xl border p-4 transition ${
-                  draft.productType === "simple"
-                    ? "border-amber-400/40 bg-amber-500/10"
-                    : "border-white/10 bg-slate-900/70 hover:border-white/25"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="product-type"
-                  className="sr-only"
-                  checked={draft.productType === "simple"}
-                  onChange={() =>
-                    setDraft((current) => {
-                      // variant → simple: flatten every color's images into
-                      // the gallery so switching types never loses uploads.
-                      const flattened = (current.colors || []).flatMap((color) =>
-                        normalizeColorImages(color.images),
-                      );
-                      return {
-                        ...current,
-                        productType: "simple",
-                        gallery: normalizeColorImages(current.gallery).length
-                          ? current.gallery
-                          : flattened,
-                      };
-                    })
-                  }
-                />
-                <span className="block">
-                  <span className="font-semibold text-white">
-                    Simple Product
-                  </span>
-                  <span className="mt-1 block text-sm text-slate-400">
-                    One price and a single stock quantity. Best for
-                    accessories, mugs, and posters.
-                  </span>
-                </span>
-              </label>
+                </label>
+              ))}
             </div>
           </div>
 
@@ -1463,7 +1763,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             </div>
           </div>
 
-          {draft.productType !== "simple" ? (
+          {hasColor ? (
             <>
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <div className="flex items-center justify-between gap-3">
@@ -1801,6 +2101,15 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
 
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <h3 className="text-lg font-semibold text-white">Inventory</h3>
+            {variationType === "color_size" ? (
+              <p className="mt-1 text-sm text-slate-400">
+                Set stock for every color and size combination.
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-slate-400">
+                Set the stock quantity for every color.
+              </p>
+            )}
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {draft.colors.map((color) => (
                 <div
@@ -1814,36 +2123,66 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                     />
                     <p className="font-medium text-white">{color.name}</p>
                   </div>
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                    {color.variants?.map((variant) => (
-                      <label
-                        key={`${color.id}-${variant.size}`}
-                        className="rounded-2xl border border-white/10 bg-slate-950/70 p-3 text-sm text-slate-300"
-                      >
-                        <div className="flex items-center justify-between">
-                          <span>{variant.size}</span>
-                          <span
-                            className={`text-xs ${variant.stock === 0 ? "text-rose-300" : "text-emerald-300"}`}
-                          >
-                            {variant.stock === 0 ? "Unavailable" : "In stock"}
-                          </span>
-                        </div>
-                        <input
-                          type="number"
-                          min="0"
-                          value={variant.stock}
-                          onChange={(event) =>
-                            updateVariantStock(
-                              color.id,
-                              variant.size,
-                              event.target.value,
-                            )
-                          }
-                          className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-2 py-2 text-sm text-white"
-                        />
-                      </label>
-                    ))}
-                  </div>
+                  {variationType === "color_size" ? (
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      {color.variants?.map((variant) => (
+                        <label
+                          key={`${color.id}-${variant.size}`}
+                          className="rounded-2xl border border-white/10 bg-slate-950/70 p-3 text-sm text-slate-300"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span>{variant.size}</span>
+                            <span
+                              className={`text-xs ${variant.stock === 0 ? "text-rose-300" : "text-emerald-300"}`}
+                            >
+                              {variant.stock === 0
+                                ? "Unavailable"
+                                : "In stock"}
+                            </span>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            value={variant.stock}
+                            onChange={(event) =>
+                              updateVariantStock(
+                                color.id,
+                                variant.size,
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-2 py-2 text-sm text-white"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <label className="mt-3 block rounded-2xl border border-white/10 bg-slate-950/70 p-3 text-sm text-slate-300">
+                      <div className="flex items-center justify-between">
+                        <span>Stock</span>
+                        <span
+                          className={`text-xs ${
+                            (color.variants?.[0]?.stock ?? 0) === 0
+                              ? "text-rose-300"
+                              : "text-emerald-300"
+                          }`}
+                        >
+                          {(color.variants?.[0]?.stock ?? 0) === 0
+                            ? "Unavailable"
+                            : "In stock"}
+                        </span>
+                      </div>
+                      <input
+                        type="number"
+                        min="0"
+                        value={color.variants?.[0]?.stock ?? 0}
+                        onChange={(event) =>
+                          updateColorStock(color.id, event.target.value)
+                        }
+                        className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-2 py-2 text-sm text-white"
+                      />
+                    </label>
+                  )}
                 </div>
               ))}
             </div>
@@ -1851,25 +2190,85 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             </>
           ) : null}
 
-          {draft.productType === "simple" ? (
+          {hasSize ? (
+            <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+              <h3 className="text-lg font-semibold text-white">Sizes</h3>
+              {variationType === "size" ? (
+                <p className="mt-1 text-sm text-slate-400">
+                  Select the sizes customers can order and set stock for each.
+                </p>
+              ) : (
+                <p className="mt-1 text-sm text-slate-400">
+                  Select the sizes that appear for every color.
+                </p>
+              )}
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {activeSizes.map((size) => {
+                  const enabled = size.enabled !== false;
+                  return (
+                    <div
+                      key={size.id}
+                      className={`rounded-2xl border p-3 ${
+                        enabled
+                          ? "border-amber-400/30 bg-amber-500/5"
+                          : "border-white/10 bg-slate-900/70 opacity-70"
+                      }`}
+                    >
+                      <label className="flex cursor-pointer items-center gap-3 text-sm font-medium text-white">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={() => toggleSize(size)}
+                          className="h-4 w-4 accent-amber-500"
+                        />
+                        {size.name}
+                      </label>
+                      {variationType === "size" && enabled ? (
+                        <div className="mt-3">
+                          <label className="text-xs text-slate-400">
+                            Stock
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={size.stock ?? 0}
+                            onChange={(event) =>
+                              updateSizeStock(size.id, event.target.value)
+                            }
+                            className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950/80 px-2 py-2 text-sm text-white"
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          {variationType === "none" || variationType === "size" ? (
             <>
-          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-            <h3 className="text-lg font-semibold text-white">Stock Quantity</h3>
-            <p className="mt-1 text-sm text-slate-400">
-              Total available units. Only one stock value exists for simple
-              products.
-            </p>
-            <input
-              type="number"
-              min="0"
-              value={draft.stock}
-              onChange={(event) =>
-                setDraft({ ...draft, stock: event.target.value })
-              }
-              className="mt-4 w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-3 text-sm text-white sm:max-w-xs"
-              placeholder="e.g. 53"
-            />
-          </div>
+          {variationType === "none" ? (
+            <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+              <h3 className="text-lg font-semibold text-white">
+                Stock Quantity
+              </h3>
+              <p className="mt-1 text-sm text-slate-400">
+                Total available units. Only one stock value exists for
+                products without variations.
+              </p>
+              <input
+                type="number"
+                min="0"
+                value={draft.stock}
+                onChange={(event) =>
+                  setDraft({ ...draft, stock: event.target.value })
+                }
+                className="mt-4 w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-3 text-sm text-white sm:max-w-xs"
+                placeholder="e.g. 53"
+              />
+            </div>
+          ) : null}
 
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
             <div className="flex items-center justify-between gap-3">
@@ -1878,7 +2277,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                   Product gallery
                 </h3>
                 <p className="mt-1 text-sm text-slate-400">
-                  One gallery for every simple product — no color folders.
+                  One color-less gallery — no color folders needed.
                 </p>
               </div>
               <div className="rounded-2xl border border-dashed border-slate-700 px-3 py-2 text-sm text-slate-300">
@@ -2134,8 +2533,10 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         <div className="mt-4 flex flex-wrap items-center gap-2">
           {[
             { value: "all", label: "All" },
-            { value: "variant", label: "Variant" },
-            { value: "simple", label: "Simple" },
+            ...VARIATION_OPTIONS.map((option) => ({
+              value: option.value,
+              label: option.label,
+            })),
           ].map((option) => (
             <button
               key={option.value}
@@ -2165,7 +2566,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             </thead>
             <tbody>
               {visibleProducts.map((product) => {
-                const productType = product.productType || "variant";
+                const rowVariationType = resolveVariationType(product);
                 return (
                 <tr key={product.id} className="border-t border-white/10">
                   <td className="px-3 py-3">
@@ -2174,19 +2575,21 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                         {product.name}
                       </p>
                       <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                          productType === "simple"
-                            ? "bg-sky-500/15 text-sky-300"
-                            : "bg-violet-500/15 text-violet-300"
-                        }`}
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${variationBadge(rowVariationType)}`}
                       >
-                        {productType}
+                        {variationLabel(rowVariationType)}
                       </span>
                     </div>
                     <p className="text-xs text-slate-500">{product.slug}</p>
                   </td>
                   <td className="px-3 py-3 text-xs text-slate-400">
-                    {productType === "simple" ? "No colors / sizes" : "Colors & sizes"}
+                    {rowVariationType === "none"
+                      ? "No color or size selectors"
+                      : rowVariationType === "color"
+                        ? "Color selector only"
+                        : rowVariationType === "size"
+                          ? "Size selector only"
+                          : "Color + size selectors"}
                   </td>
                   <td className="px-3 py-3">{formatCurrency(product.price)}</td>
                   <td className="px-3 py-3">{product.category}</td>
@@ -2205,7 +2608,21 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                         onClick={() =>
                           setDraft({
                             ...product,
-                            productType: product.productType || "variant",
+                            id: product.id,
+                            variationType: rowVariationType,
+                            colors: (product.colors || []).map((color) => ({
+                              ...color,
+                              images: normalizeColorImages(color.images),
+                              variants: color.variants?.length
+                                ? color.variants
+                                : [{ size: null, stock: 0 }],
+                            })),
+                            sizes: (product.sizes || []).map((size) => ({
+                              id: size.id,
+                              name: size.name,
+                              enabled: true,
+                              stock: size.stock ?? 0,
+                            })),
                             gallery: product.gallery || [],
                             stock: product.stock ?? "",
                           })
@@ -2363,17 +2780,11 @@ function InventoryView() {
                       <p className="font-semibold text-white">
                         {group.productName}
                       </p>
-                      {group.productType ? (
+                      {group.variationType ? (
                         <span
-                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                            group.productType === "simple"
-                              ? "bg-sky-500/15 text-sky-300"
-                              : "bg-violet-500/15 text-violet-300"
-                          }`}
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${variationBadge(group.variationType)}`}
                         >
-                          {group.productType === "simple"
-                            ? "Simple"
-                            : "Variant"}
+                          {variationLabel(group.variationType)}
                         </span>
                       ) : null}
                     </div>

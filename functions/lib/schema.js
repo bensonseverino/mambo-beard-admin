@@ -18,6 +18,7 @@ export const SCHEMA_STATEMENTS = [
     featured INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     product_type TEXT NOT NULL DEFAULT 'variant',
+    variation_type TEXT NOT NULL DEFAULT 'color_size',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -112,6 +113,11 @@ export const SCHEMA_STATEMENTS = [
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  // One stock row per variation combination. NULL color_id/size_id are
+  // coalesced to '' so simple (NULL/NULL), color-only (color/NULL), size-only
+  // (NULL/size), and color_size rows each have exactly one row per combo.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_variation
+    ON inventory (product_id, COALESCE(color_id, ''), COALESCE(size_id, ''))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone)`,
   `CREATE TABLE IF NOT EXISTS admins (
     id TEXT PRIMARY KEY,
@@ -143,7 +149,8 @@ export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUE
   ('size-s', 'S'),
   ('size-m', 'M'),
   ('size-l', 'L'),
-  ('size-xl', 'XL')`;
+  ('size-xl', 'XL'),
+  ('size-xxl', 'XXL')`;
 
 /**
  * Create every table (idempotent) and seed the standard sizes.
@@ -152,7 +159,7 @@ export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUE
 export const ensureSchema = async (env) => {
   const db = env?.DB;
   if (!db) return;
-  const indexStatement = SCHEMA_STATEMENTS.find((sql) =>
+  const indexStatements = SCHEMA_STATEMENTS.filter((sql) =>
     sql.startsWith("CREATE UNIQUE INDEX"),
   );
   const statements = SCHEMA_STATEMENTS.filter(
@@ -161,15 +168,17 @@ export const ensureSchema = async (env) => {
   statements.push(db.prepare(SIZE_SEED_STATEMENT));
   await db.batch(statements);
 
-  // A pre-existing customers table with duplicate phones would make the
-  // unique index fail to build. Catch it so one dirty table can't take down
-  // every handler that bootstraps the schema.
-  if (indexStatement) {
+  // Unique indexes can fail on pre-existing dirty data (e.g. duplicate
+  // customer phones or duplicate inventory combinations). Catch each one so
+  // a single dirty table can't take down every handler that bootstraps the
+  // schema.
+  for (const indexStatement of indexStatements) {
     try {
       await db.prepare(indexStatement).run();
     } catch (error) {
       console.warn(
-        "[schema] Could not create unique index on customers(phone):",
+        "[schema] Could not create unique index:",
+        indexStatement.slice(0, 80),
         error?.message || error,
       );
     }
@@ -207,6 +216,7 @@ export const errorResponse = (error) => {
     {
       success: false,
       message: isServerError ? "Internal server error." : error.message,
+      error: isServerError ? "Internal server error." : error.message,
       code: error.code || (isServerError ? "D1_ERROR" : "API_ERROR"),
     },
     { status },

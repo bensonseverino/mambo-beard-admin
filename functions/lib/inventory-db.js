@@ -4,6 +4,7 @@
 // (kept in sync by checkout and product writes). Listing groups rows by
 // product → color → size; updates write to both mirrors atomically.
 
+import { VARIATION_TYPES } from "./products-db.js";
 import { apiError, ensureSchema, requireDb } from "./schema.js";
 
 const toInt = (value, fallback = 0) => {
@@ -24,7 +25,7 @@ export const listInventory = async (env) => {
     await Promise.all([
       env.DB.prepare("SELECT * FROM inventory").all(),
       env.DB.prepare(
-        "SELECT id, name, category, active, product_type FROM products",
+        "SELECT id, name, category, active, product_type, variation_type FROM products",
       ).all(),
       env.DB.prepare("SELECT id, name, hex FROM product_colors").all(),
       env.DB.prepare("SELECT id, name FROM sizes").all(),
@@ -46,7 +47,11 @@ export const listInventory = async (env) => {
     // Skip soft-deleted products — their stock is no longer sellable.
     if (!product || !product.active) continue;
 
-    const isSimple = String(product.product_type || "variant") === "simple";
+    const variationType = VARIATION_TYPES.includes(product.variation_type)
+      ? product.variation_type
+      : String(product.product_type || "variant") === "simple"
+        ? "none"
+        : "color_size";
 
     let group = groups.get(row.product_id);
     if (!group) {
@@ -54,13 +59,14 @@ export const listInventory = async (env) => {
         productId: row.product_id,
         productName: product.name,
         category: product.category,
-        productType: isSimple ? "simple" : "variant",
+        productType: variationType === "none" ? "simple" : "variant",
+        variationType,
         colors: new Map(),
       };
       groups.set(row.product_id, group);
     }
 
-    if (isSimple) {
+    if (variationType === "none") {
       // Simple products: a single stock row with no color and no size.
       let colorGroup = group.colors.get(null);
       if (!colorGroup) {
@@ -81,15 +87,36 @@ export const listInventory = async (env) => {
       continue;
     }
 
-    const color = colorById.get(row.color_id);
-    if (!color) continue;
+    if (variationType === "size") {
+      // Size-only products: one pseudo group with a stock row per size.
+      let colorGroup = group.colors.get(null);
+      if (!colorGroup) {
+        colorGroup = {
+          colorId: null,
+          colorName: "Sizes",
+          hex: null,
+          rows: [],
+        };
+        group.colors.set(null, colorGroup);
+      }
+      colorGroup.rows.push({
+        id: row.id,
+        sizeId: row.size_id,
+        size: sizeNames.get(row.size_id) || row.size_id,
+        stock: toInt(row.stock),
+      });
+      continue;
+    }
+
+    const colorRow = colorById.get(row.color_id);
+    if (!colorRow) continue;
 
     let colorGroup = group.colors.get(row.color_id);
     if (!colorGroup) {
       colorGroup = {
         colorId: row.color_id,
-        colorName: color.name,
-        hex: color.hex,
+        colorName: colorRow.name,
+        hex: colorRow.hex,
         rows: [],
       };
       group.colors.set(row.color_id, colorGroup);
