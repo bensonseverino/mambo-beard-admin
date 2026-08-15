@@ -580,11 +580,14 @@ export const listOrders = async (env, options = {}) => {
         .bind(...bindings)
         .all(),
       env.DB.prepare(
-        `SELECT * FROM orders${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `SELECT id, order_number, customer_name, phone, email, location, delivery_fee, subtotal, total, status, created_at
+         FROM orders${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
         .bind(...bindings, pageSize, (page - 1) * pageSize)
         .all(),
-      env.DB.prepare("SELECT * FROM order_items").all(),
+      env.DB.prepare(
+        "SELECT id, order_id, product_id, color_id, size, size_id, quantity, price FROM order_items",
+      ).all(),
       env.DB.prepare("SELECT id, name FROM products").all(),
       env.DB.prepare("SELECT id, name, hex FROM product_colors").all(),
     ]);

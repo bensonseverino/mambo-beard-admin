@@ -119,6 +119,17 @@ export const SCHEMA_STATEMENTS = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_variation
     ON inventory (product_id, COALESCE(color_id, ''), COALESCE(size_id, ''))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone)`,
+  // Plain (non-unique) indexes for the columns the API actually filters on.
+  // The tables are tiny today, but these keep catalog/detail lookups and the
+  // dashboard's recent-orders query from degrading as data grows.
+  `CREATE INDEX IF NOT EXISTS idx_product_colors_product
+    ON product_colors (product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_product_images_product
+    ON product_images (product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_product_variants_product
+    ON product_variants (product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status)`,
   `CREATE TABLE IF NOT EXISTS admins (
     id TEXT PRIMARY KEY,
     email TEXT UNIQUE NOT NULL,
@@ -154,35 +165,46 @@ export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUE
 
 /**
  * Create every table (idempotent) and seed the standard sizes.
- * Safe to call on every API request — no-op once the schema exists.
+ *
+ * Safe to call on every API request. Once the bootstrap has run for a given
+ * database instance it is skipped for the lifetime of the isolate, so warm
+ * isolates stop paying a ~15-statement D1 batch on every request. Fresh
+ * isolates (new deploys, cold starts) still bootstrap, which preserves the
+ * deploy-time schema guarantee.
  */
+const ensuredDatabases = new WeakMap();
+
 export const ensureSchema = async (env) => {
   const db = env?.DB;
   if (!db) return;
+  if (ensuredDatabases.has(db)) return;
+
   const indexStatements = SCHEMA_STATEMENTS.filter((sql) =>
-    sql.startsWith("CREATE UNIQUE INDEX"),
+    sql.includes("INDEX IF NOT EXISTS"),
   );
   const statements = SCHEMA_STATEMENTS.filter(
-    (sql) => !sql.startsWith("CREATE UNIQUE INDEX"),
+    (sql) => !sql.includes("INDEX IF NOT EXISTS"),
   ).map((sql) => db.prepare(sql));
   statements.push(db.prepare(SIZE_SEED_STATEMENT));
   await db.batch(statements);
 
-  // Unique indexes can fail on pre-existing dirty data (e.g. duplicate
-  // customer phones or duplicate inventory combinations). Catch each one so
-  // a single dirty table can't take down every handler that bootstraps the
-  // schema.
+  // Indexes can fail on pre-existing dirty data (e.g. duplicate customer
+  // phones or duplicate inventory combinations). Catch each one so a single
+  // dirty table can't take down every handler that bootstraps the schema.
   for (const indexStatement of indexStatements) {
     try {
       await db.prepare(indexStatement).run();
     } catch (error) {
       console.warn(
-        "[schema] Could not create unique index:",
+        "[schema] Could not create index:",
         indexStatement.slice(0, 80),
         error?.message || error,
       );
     }
   }
+
+  // Only cache the success: if the batch failed, the next request retries.
+  ensuredDatabases.set(db, true);
 };
 
 /** Require the D1 binding; throws a structured error when it is missing. */

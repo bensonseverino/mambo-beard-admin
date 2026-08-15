@@ -2,7 +2,7 @@
 //
 // Supports the SQL subset used by the admin backend:
 //   CREATE TABLE IF NOT EXISTS ...
-//   CREATE UNIQUE INDEX IF NOT EXISTS ... (no-op)
+//   CREATE [UNIQUE] INDEX IF NOT EXISTS ... (no-op)
 //   INSERT [OR IGNORE] INTO t (cols) VALUES (...), (...)
 //   INSERT INTO t (cols) VALUES (...) ON CONFLICT(col) DO UPDATE SET ...
 //   SELECT cols FROM t [WHERE ...] [ORDER BY ...] [LIMIT n]
@@ -201,7 +201,7 @@ export function createFakeD1() {
     }
 
     match = statement.match(
-      /^CREATE UNIQUE INDEX IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s+ON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]+)\)$/i,
+      /^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s+ON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]+)\)$/i,
     );
     if (match) {
       rowsOf(match[2]);

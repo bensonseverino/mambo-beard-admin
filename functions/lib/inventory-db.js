@@ -23,7 +23,9 @@ export const listInventory = async (env) => {
 
   const [inventoryResult, productsResult, colorsResult, sizesResult] =
     await Promise.all([
-      env.DB.prepare("SELECT * FROM inventory").all(),
+      env.DB.prepare(
+        "SELECT id, product_id, color_id, size_id, stock FROM inventory",
+      ).all(),
       env.DB.prepare(
         "SELECT id, name, category, active, product_type, variation_type FROM products",
       ).all(),

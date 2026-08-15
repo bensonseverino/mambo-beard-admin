@@ -42,11 +42,13 @@ export async function onRequest({ request, env }) {
         .bind("pending")
         .first(),
       db.prepare(
-        "SELECT * FROM inventory WHERE stock <= ? ORDER BY stock ASC LIMIT 20",
+        "SELECT id, product_id, color_id, size_id, stock FROM inventory WHERE stock <= ? ORDER BY stock ASC LIMIT 20",
       )
         .bind(2)
         .all(),
-      db.prepare("SELECT * FROM orders ORDER BY created_at DESC LIMIT 8").all(),
+      db.prepare(
+        "SELECT id, order_number, customer_name, phone, status, total, created_at FROM orders ORDER BY created_at DESC LIMIT 8",
+      ).all(),
       db.prepare("SELECT id, name, active FROM products").all(),
       db.prepare("SELECT id, name, hex FROM product_colors").all(),
       db.prepare("SELECT id, name FROM sizes").all(),

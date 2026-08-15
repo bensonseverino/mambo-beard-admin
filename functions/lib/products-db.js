@@ -303,18 +303,22 @@ export const listProducts = async (env, options = {}) => {
   // includeInactive to see soft-deleted products and restore them.
   const activeClause = options.includeInactive ? "" : " WHERE active = 1";
 
+  // Only the columns each join actually reads — keeps the D1 response small.
   const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
-        `SELECT * FROM products${activeClause} ORDER BY created_at DESC`,
+        `SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type
+         FROM products${activeClause} ORDER BY created_at DESC`,
       ).all(),
       env.DB.prepare(
-        "SELECT * FROM product_colors ORDER BY sort_order ASC, created_at DESC",
+        "SELECT id, product_id, name, hex, sort_order FROM product_colors ORDER BY sort_order ASC, created_at DESC",
       ).all(),
       env.DB.prepare(
-        "SELECT * FROM product_images ORDER BY sort_order ASC, uploaded_at DESC",
+        "SELECT id, product_id, color_id, path, type, file_name, size, uploaded_at, is_primary, sort_order FROM product_images ORDER BY sort_order ASC, uploaded_at DESC",
       ).all(),
-      env.DB.prepare("SELECT * FROM product_variants ORDER BY size ASC").all(),
+      env.DB.prepare(
+        "SELECT color_id, size, stock FROM product_variants ORDER BY size ASC",
+      ).all(),
       env.DB.prepare(
         "SELECT product_id, color_id, size_id, stock FROM inventory",
       ).all(),
@@ -692,8 +696,11 @@ export const getProductDetail = async (env, key) => {
   await ensureSchema(env);
 
   // Storefront-facing detail: soft-deleted products are not viewable.
+  // Only the columns buildProductVariation and the response actually read.
   const product = await env.DB
-    .prepare("SELECT * FROM products WHERE (id = ? OR slug = ?) AND active = 1")
+    .prepare(
+      "SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type FROM products WHERE (id = ? OR slug = ?) AND active = 1",
+    )
     .bind(key, key)
     .first();
   if (!product) return null;
@@ -701,22 +708,22 @@ export const getProductDetail = async (env, key) => {
   const [colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
-        "SELECT * FROM product_colors WHERE product_id = ? ORDER BY sort_order ASC, created_at DESC",
+        "SELECT id, product_id, name, hex, sort_order FROM product_colors WHERE product_id = ? ORDER BY sort_order ASC, created_at DESC",
       )
         .bind(product.id)
         .all(),
       env.DB.prepare(
-        "SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC, uploaded_at DESC",
+        "SELECT id, product_id, color_id, path, type, file_name, size, uploaded_at, is_primary, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC, uploaded_at DESC",
       )
         .bind(product.id)
         .all(),
       env.DB.prepare(
-        "SELECT * FROM product_variants WHERE product_id = ? ORDER BY size ASC",
+        "SELECT color_id, size, stock FROM product_variants WHERE product_id = ? ORDER BY size ASC",
       )
         .bind(product.id)
         .all(),
       env.DB.prepare(
-        "SELECT * FROM inventory WHERE product_id = ?",
+        "SELECT id, product_id, color_id, size_id, stock FROM inventory WHERE product_id = ?",
       )
         .bind(product.id)
         .all(),
