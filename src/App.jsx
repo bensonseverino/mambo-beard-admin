@@ -272,6 +272,56 @@ const formatCurrency = (value) =>
   }).format(value);
 
 const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png"];
+
+// Re-encodes an uploaded image to a clean, static WebP. Some design tools
+// export single-frame WebP files wrapped in a VP8X container with the
+// ANIMATION flag set (plus alpha/ICCP chunks); Google Merchant Center
+// rejects those as "Invalid image encoding". Canvas output is never
+// animated, so drawing the image through a canvas guarantees a clean file —
+// white background flattened, EXIF orientation applied. Returns null (the
+// caller keeps the original file) when the browser cannot decode/encode.
+const reencodeToStaticWebp = async (file) => {
+  const originalName =
+    (file.name || "image").replace(/\.[^.]+$/, "") || "image";
+  try {
+    let source;
+    try {
+      source = await createImageBitmap(file, {
+        imageOrientation: "from-image",
+      });
+    } catch {
+      const url = URL.createObjectURL(file);
+      try {
+        source = await new Promise((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error("decode failed"));
+          el.src = url;
+        });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+    const width = source.naturalWidth ?? source.width;
+    const height = source.naturalHeight ?? source.height;
+    if (!width || !height) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0);
+    if (typeof source.close === "function") source.close();
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/webp", 0.9),
+    );
+    if (!blob || blob.type !== "image/webp") return null;
+    return new File([blob], originalName + ".webp", { type: "image/webp" });
+  } catch {
+    return null;
+  }
+};
 const imageTypeOptions = [
   "front",
   "back",
@@ -1324,8 +1374,19 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     }));
   };
 
-  const enqueueUploads = (colorId, files, imageType) => {
-    const colorQueue = Array.from(files).map((file, index) => ({
+  const enqueueUploads = async (colorId, files, imageType) => {
+    // Re-encode every picked file to a clean, static WebP before uploading:
+    // design tools sometimes export single-frame WebP wrapped in an animated
+    // VP8X container, which Google Merchant Center rejects. Falls back to the
+    // original file if the browser cannot decode/encode.
+    const converted = await Promise.all(
+      Array.from(files).map(async (file) => {
+        const fixed = await reencodeToStaticWebp(file);
+        return fixed || file;
+      }),
+    );
+
+    const colorQueue = converted.map((file, index) => ({
       id: `${colorId}-${Date.now()}-${index}`,
       file,
       imageType,

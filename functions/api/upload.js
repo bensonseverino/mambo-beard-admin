@@ -1,3 +1,5 @@
+import { isAnimatedWebp } from "../lib/images.js";
+
 const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png"];
 const maxImageSizeBytes = 20 * 1024 * 1024;
 
@@ -53,6 +55,22 @@ export async function onRequestPost(context) {
     }
 
     const arrayBuffer = await file.arrayBuffer();
+
+    // Reject animated-flagged WebP up front: Google Merchant Center refuses
+    // them ("Invalid image encoding"), and many design tools export
+    // single-frame images wrapped in an animated VP8X container by mistake.
+    const bytes = new Uint8Array(arrayBuffer);
+    if (isAnimatedWebp(bytes)) {
+      return Response.json(
+        {
+          success: false,
+          error:
+            "Animated WebP files are not supported. Export the image as a static WebP, JPG, or PNG and try again.",
+        },
+        { status: 400 },
+      );
+    }
+
     if (arrayBuffer.byteLength > maxImageSizeBytes) {
       return Response.json(
         { success: false, error: "File exceeds 20 MB limit" },
