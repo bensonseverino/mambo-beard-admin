@@ -271,7 +271,7 @@ const formatCurrency = (value) =>
     maximumFractionDigits: 0,
   }).format(value);
 
-const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png"];
+const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png", "image/gif", "image/avif", "image/tiff", "image/bmp"];
 
 // Re-encodes an uploaded image to a clean, static WebP. Some design tools
 // export single-frame WebP files wrapped in a VP8X container with the
@@ -280,7 +280,39 @@ const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png"];
 // animated, so drawing the image through a canvas guarantees a clean file —
 // white background flattened, EXIF orientation applied. Returns null (the
 // caller keeps the original file) when the browser cannot decode/encode.
-const reencodeToStaticWebp = async (file) => {
+// Maximum longest-edge dimension for product images. Images larger than
+// this are scaled down (aspect-ratio preserved) before upload to keep
+// file sizes manageable and ensure fast page loads.
+const MAX_IMAGE_DIMENSION = 2048;
+
+// Output quality for re-encoded uploads. AVIF at 0.75 matches WebP at 0.85
+// visually while being ~20% smaller. WebP is the fallback for older browsers.
+const AVIF_QUALITY = 0.75;
+const WEBP_QUALITY = 0.85;
+
+/**
+ * Attempt to encode a canvas to the given MIME type. Returns the Blob or
+ * null when the browser does not support that encoder.
+ */
+const canvasToBlob = (canvas, mimeType, quality) =>
+  new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
+
+/**
+ * Re-encodes an uploaded image to a clean, modern format, optionally
+ * resizing it down to MAX_IMAGE_DIMENSION on the longest edge.
+ *
+ * Encoding strategy:
+ *   1. Try AVIF first — best compression (Chrome 96+, Firefox 93+,
+ *      Safari 16.4+).
+ *   2. Fall back to WebP — broader support (all modern browsers).
+ *   3. Return null so the caller uploads the original file.
+ *
+ * Drawing through a canvas guarantees a clean file: white background
+ * flattened, EXIF orientation applied, animation stripped.
+ *
+ * @returns {Promise<File|null>} Optimized file or null to keep original.
+ */
+const reencodeImage = async (file) => {
   const originalName =
     (file.name || "image").replace(/\.[^.]+$/, "") || "image";
   try {
@@ -302,22 +334,44 @@ const reencodeToStaticWebp = async (file) => {
         URL.revokeObjectURL(url);
       }
     }
-    const width = source.naturalWidth ?? source.width;
-    const height = source.naturalHeight ?? source.height;
-    if (!width || !height) return null;
+    const srcWidth = source.naturalWidth ?? source.width;
+    const srcHeight = source.naturalHeight ?? source.height;
+    if (!srcWidth || !srcHeight) return null;
+
+    // Scale down if the longest edge exceeds the cap; keep aspect ratio.
+    const longest = Math.max(srcWidth, srcHeight);
+    let width = srcWidth;
+    let height = srcHeight;
+    if (longest > MAX_IMAGE_DIMENSION) {
+      const scale = MAX_IMAGE_DIMENSION / longest;
+      width = Math.round(srcWidth * scale);
+      height = Math.round(srcHeight * scale);
+    }
+
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(source, 0, 0);
+    ctx.drawImage(source, 0, 0, width, height);
     if (typeof source.close === "function") source.close();
-    const blob = await new Promise((resolve) =>
-      canvas.toBlob(resolve, "image/webp", 0.9),
-    );
-    if (!blob || blob.type !== "image/webp") return null;
-    return new File([blob], originalName + ".webp", { type: "image/webp" });
+
+    // 1) Try AVIF — smallest files at equal visual quality.
+    let blob = await canvasToBlob(canvas, "image/avif", AVIF_QUALITY);
+    if (blob && blob.type === "image/avif") {
+      return new File([blob], originalName + ".avif", { type: "image/avif" });
+    }
+
+    // 2) Fall back to WebP — broader browser support.
+    blob = await canvasToBlob(canvas, "image/webp", WEBP_QUALITY);
+    if (blob && blob.type === "image/webp") {
+      return new File([blob], originalName + ".webp", { type: "image/webp" });
+    }
+
+    // 3) Browser cannot encode either format — let the caller upload
+    //    the original file.
+    return null;
   } catch {
     return null;
   }
@@ -948,6 +1002,11 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   const [uploadQueues, setUploadQueues] = useState({});
   const [typeFilter, setTypeFilter] = useState("all");
   const [sizeCatalog, setSizeCatalog] = useState(FALLBACK_SIZE_CATALOG);
+  // Bulk upload: target color and image type for the global drop zone.
+  const [bulkColorId, setBulkColorId] = useState("");
+  const [bulkImageType, setBulkImageType] = useState("front");
+  // Drag-over highlight for the global drop zone.
+  const [bulkDragOver, setBulkDragOver] = useState(false);
 
   // Load the size catalog from the API so new sizes need no code changes.
   useEffect(() => {
@@ -1375,13 +1434,13 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   };
 
   const enqueueUploads = async (colorId, files, imageType) => {
-    // Re-encode every picked file to a clean, static WebP before uploading:
-    // design tools sometimes export single-frame WebP wrapped in an animated
-    // VP8X container, which Google Merchant Center rejects. Falls back to the
-    // original file if the browser cannot decode/encode.
+    // Re-encode every picked file to a modern format (AVIF → WebP) before
+    // uploading: strips animation flags, resizes oversized images, and
+    // flattens alpha onto a white background. Falls back to the original
+    // file if the browser cannot decode/encode.
     const converted = await Promise.all(
       Array.from(files).map(async (file) => {
-        const fixed = await reencodeToStaticWebp(file);
+        const fixed = await reencodeImage(file);
         return fixed || file;
       }),
     );
@@ -1417,6 +1476,50 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   const addImageToGallery = (files, imageType = "gallery") => {
     enqueueUploads(GALLERY_KEY, files, imageType);
   };
+
+  // ── Bulk upload handlers ─────────────────────────────────────────────
+  // The global drop zone at the top of the Images section lets admins
+  // drop many files at once into a chosen color, without scrolling to
+  // each per-color section.
+
+  const handleBulkDrop = (event) => {
+    event.preventDefault();
+    setBulkDragOver(false);
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) return;
+    const targetId = bulkColorId || draft.colors[0]?.id;
+    if (!targetId) return;
+    void addImageToColor(targetId, files, bulkImageType);
+  };
+
+  const handleBulkFileSelection = (event) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    const targetId = bulkColorId || draft.colors[0]?.id;
+    if (!targetId) return;
+    void addImageToColor(targetId, files, bulkImageType);
+    event.target.value = "";
+  };
+
+  // Aggregate upload stats across all colors for the summary bar.
+  const bulkStats = useMemo(() => {
+    let total = 0;
+    let uploading = 0;
+    let completed = 0;
+    let errors = 0;
+    for (const queue of Object.values(uploadQueues)) {
+      for (const item of queue) {
+        total++;
+        if (item.status === "error") errors++;
+        else if (item.progress >= 100) completed++;
+        else uploading++;
+      }
+    }
+    const avgProgress = total
+      ? Object.values(uploadQueues).flat().reduce((sum, i) => sum + i.progress, 0) / total
+      : 0;
+    return { total, uploading, completed, errors, avgProgress };
+  }, [uploadQueues]);
 
   const uploadQueueItem = async (colorId, queueItem) => {
     const isGallery = colorId === GALLERY_KEY;
@@ -1919,6 +2022,100 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
             <p className="mt-1 text-sm text-slate-400">
               Each color manages its own gallery and one primary image.
             </p>
+
+            {/* ── Bulk upload zone ──────────────────────────────────────── */}
+            {draft.colors.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <label className="text-sm font-medium text-slate-200">
+                    Upload to
+                    <select
+                      value={bulkColorId || (draft.colors[0]?.id ?? "")}
+                      onChange={(event) => setBulkColorId(event.target.value)}
+                      className="ml-2 rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+                    >
+                      {draft.colors.map((color) => (
+                        <option key={color.id} value={color.id}>
+                          {color.name || "Unnamed"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm font-medium text-slate-200">
+                    Image type
+                    <select
+                      value={bulkImageType}
+                      onChange={(event) => setBulkImageType(event.target.value)}
+                      className="ml-2 rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+                    >
+                      {imageTypeOptions.map((type) => (
+                        <option key={type} value={type}>
+                          {type}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="cursor-pointer rounded-full border border-amber-500/30 px-4 py-2 text-sm font-medium text-amber-300 transition hover:bg-amber-500/10">
+                    <input
+                      type="file"
+                      accept={acceptedImageTypes.join(",")}
+                      multiple
+                      className="hidden"
+                      onChange={handleBulkFileSelection}
+                    />
+                    + Choose files
+                  </label>
+                </div>
+                <div
+                  className={`rounded-2xl border-2 border-dashed p-6 text-center transition ${
+                    bulkDragOver
+                      ? "border-amber-400 bg-amber-500/10"
+                      : "border-slate-700 bg-slate-950/70"
+                  }`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setBulkDragOver(true);
+                  }}
+                  onDragLeave={() => setBulkDragOver(false)}
+                  onDrop={handleBulkDrop}
+                >
+                  <p className="text-sm font-medium text-slate-200">
+                    Drop multiple images here
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    WebP, JPG, PNG, GIF, AVIF, TIFF, and BMP · up to 20 MB each
+                  </p>
+                </div>
+                {/* Aggregate upload progress bar */}
+                {bulkStats.total > 0 ? (
+                  <div className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-300">
+                        {bulkStats.uploading > 0
+                          ? `Uploading ${bulkStats.uploading} of ${bulkStats.total}…`
+                          : bulkStats.errors > 0
+                            ? `${bulkStats.completed} done, ${bulkStats.errors} failed`
+                            : `${bulkStats.total} uploaded`}
+                      </span>
+                      <span className="text-slate-500">
+                        {Math.round(bulkStats.avgProgress)}%
+                      </span>
+                    </div>
+                    <div className="mt-2 h-1.5 rounded-full bg-slate-800">
+                      <div
+                        className={`h-1.5 rounded-full transition-all ${
+                          bulkStats.errors > 0 && bulkStats.uploading === 0
+                            ? "bg-rose-500"
+                            : "bg-amber-500"
+                        }`}
+                        style={{ width: `${bulkStats.avgProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="mt-4 space-y-5">
               {draft.colors.map((color) => {
                 const colorImages = normalizeColorImages(color.images);
@@ -1958,7 +2155,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                         Drag and drop files here
                       </p>
                       <p className="mt-1 text-sm text-slate-500">
-                        WebP, JPG, JPEG, and PNG up to 20 MB.
+                        WebP, JPG, JPEG, PNG, GIF, AVIF, TIFF, and BMP up to 20 MB.
                       </p>
                     </div>
                     <div className="mt-4 flex flex-wrap gap-2">
@@ -2365,7 +2562,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                 Drag and drop files here
               </p>
               <p className="mt-1 text-sm text-slate-500">
-                WebP, JPG, JPEG, and PNG up to 20 MB.
+                WebP, JPG, JPEG, PNG, GIF, AVIF, TIFF, and BMP up to 20 MB.
               </p>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">

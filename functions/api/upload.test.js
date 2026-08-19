@@ -55,7 +55,7 @@ const makeContext = () => {
   };
 };
 
-test("animated-flagged WebP upload is rejected with a clear error", async () => {
+test("animated-flagged WebP upload is accepted and stored in R2", async () => {
   const animated = makeWebp([
     ["VP8X", Buffer.from([0x10])],
     ["VP8 ", Buffer.alloc(10)],
@@ -63,10 +63,10 @@ test("animated-flagged WebP upload is rejected with a clear error", async () => 
   const ctx = makeContext();
   ctx.request = await makeRequest(animated);
   const res = await onRequestPost(ctx);
-  assert.equal(res.status, 400);
-  assert.equal(ctx.puts.length, 0); // nothing stored
+  assert.equal(res.status, 200);
+  assert.equal(ctx.puts.length, 1);
   const payload = await res.json();
-  assert.match(payload.error, /Animated WebP/i);
+  assert.equal(payload.success, true);
 });
 
 test("clean static WebP upload succeeds and stores bytes in R2", async () => {

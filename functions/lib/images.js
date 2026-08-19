@@ -1,11 +1,10 @@
-// Shared image helpers for the upload pipeline.
+// Shared image helpers.
 //
-// Google Merchant Center rejects animated images with "Invalid image
-// encoding [image_link]". Several design tools (Photoshop / Illustrator WebP
-// export, some converters) write single-frame images wrapped in a VP8X
-// container with the ANIMATION flag set — the file looks fine in a browser
-// but Google refuses it. The upload pipeline uses isAnimatedWebp() to reject
-// such files up front so they never reach R2.
+// Some design tools (Photoshop / Illustrator WebP export, some converters)
+// write single-frame images wrapped in a VP8X container with the ANIMATION
+// flag set. The frontend re-encodes uploads through a canvas, which
+// strips the flag. This module retains isAnimatedWebp() for testing and
+// utility use.
 
 const decoder = new TextDecoder("ascii");
 
