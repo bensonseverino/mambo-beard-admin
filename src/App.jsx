@@ -278,10 +278,9 @@ const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png", "image/gif"
 // ANIMATION flag set (plus alpha/ICCP chunks); Google Merchant Center
 // rejects those as "Invalid image encoding". Canvas output is never
 // animated, so drawing the image through a canvas guarantees a clean file —
-// EXIF orientation applied, animation stripped. Alpha is preserved by
-// default; pass { flattenAlpha: true } to composite onto a white
-// background for Google Merchant Center compliance. Returns null (the
-// caller keeps the original file) when the browser cannot decode/encode.
+// alpha preserved, EXIF orientation applied, animation stripped. Returns
+// null (the caller keeps the original file) when the browser cannot
+// decode/encode.
 // Maximum longest-edge dimension for product images. Images larger than
 // this are scaled down (aspect-ratio preserved) before upload to keep
 // file sizes manageable and ensure fast page loads.
@@ -309,16 +308,13 @@ const canvasToBlob = (canvas, mimeType, quality) =>
  *   2. Fall back to WebP — broader support (all modern browsers).
  *   3. Return null so the caller uploads the original file.
  *
- * Drawing through a canvas guarantees a clean file: alpha is preserved
- * by default, EXIF orientation applied, animation stripped. Pass
- * { flattenAlpha: true } to composite onto a white background for
- * Google Merchant Center compliance.
+ * Drawing through a canvas guarantees a clean file: alpha is preserved,
+ * EXIF orientation applied, animation stripped.
  *
  * @param {File} file
- * @param {{ flattenAlpha?: boolean }} [opts]
  * @returns {Promise<File|null>} Optimized file or null to keep original.
  */
-const reencodeImage = async (file, opts) => {
+const reencodeImage = async (file) => {
   const originalName =
     (file.name || "image").replace(/\.[^.]+$/, "") || "image";
   try {
@@ -358,10 +354,6 @@ const reencodeImage = async (file, opts) => {
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
-    if (opts?.flattenAlpha) {
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, width, height);
-    }
     ctx.drawImage(source, 0, 0, width, height);
     if (typeof source.close === "function") source.close();
 
@@ -1013,7 +1005,6 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   // Bulk upload: target color and image type for the global drop zone.
   const [bulkColorId, setBulkColorId] = useState("");
   const [bulkImageType, setBulkImageType] = useState("front");
-  const [bulkFlattenAlpha, setBulkFlattenAlpha] = useState(false);
   // Drag-over highlight for the global drop zone.
   const [bulkDragOver, setBulkDragOver] = useState(false);
 
@@ -1442,14 +1433,14 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     }));
   };
 
-  const enqueueUploads = async (colorId, files, imageType, flattenAlpha = false) => {
+  const enqueueUploads = async (colorId, files, imageType) => {
     // Re-encode every picked file to a modern format (AVIF → WebP) before
     // uploading: strips animation flags, resizes oversized images, and
-    // optionally flattens alpha onto a white background (for GMC exports).
-    // Falls back to the original file if the browser cannot decode/encode.
+    // preserves transparency. Falls back to the original file if the
+    // browser cannot decode/encode.
     const converted = await Promise.all(
       Array.from(files).map(async (file) => {
-        const fixed = await reencodeImage(file, { flattenAlpha });
+        const fixed = await reencodeImage(file);
         return fixed || file;
       }),
     );
@@ -1476,14 +1467,14 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     });
   };
 
-  const addImageToColor = async (colorId, files, imageType = "front", flattenAlpha = false) => {
+  const addImageToColor = async (colorId, files, imageType = "front") => {
     const color = draft.colors.find((item) => item.id === colorId);
     if (!color) return;
-    enqueueUploads(colorId, files, imageType, flattenAlpha);
+    enqueueUploads(colorId, files, imageType);
   };
 
-  const addImageToGallery = (files, imageType = "gallery", flattenAlpha = false) => {
-    enqueueUploads(GALLERY_KEY, files, imageType, flattenAlpha);
+  const addImageToGallery = (files, imageType = "gallery") => {
+    enqueueUploads(GALLERY_KEY, files, imageType);
   };
 
   // ── Bulk upload handlers ─────────────────────────────────────────────
@@ -1498,7 +1489,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     if (!files.length) return;
     const targetId = bulkColorId || draft.colors[0]?.id;
     if (!targetId) return;
-    void addImageToColor(targetId, files, bulkImageType, bulkFlattenAlpha);
+    void addImageToColor(targetId, files, bulkImageType);
   };
 
   const handleBulkFileSelection = (event) => {
@@ -1506,7 +1497,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     if (!files.length) return;
     const targetId = bulkColorId || draft.colors[0]?.id;
     if (!targetId) return;
-    void addImageToColor(targetId, files, bulkImageType, bulkFlattenAlpha);
+    void addImageToColor(targetId, files, bulkImageType);
     event.target.value = "";
   };
 
@@ -1753,7 +1744,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   const handleFileSelection = (event, colorId, imageType) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
-    void addImageToColor(colorId, files, imageType, bulkFlattenAlpha);
+    void addImageToColor(colorId, files, imageType);
     event.target.value = "";
   };
 
@@ -1761,13 +1752,13 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     event.preventDefault();
     const files = Array.from(event.dataTransfer?.files || []);
     if (!files.length) return;
-    void addImageToColor(colorId, files, imageType, bulkFlattenAlpha);
+    void addImageToColor(colorId, files, imageType);
   };
 
   const handleGalleryFileSelection = (event, imageType) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
-    void addImageToGallery(files, imageType, bulkFlattenAlpha);
+    void addImageToGallery(files, imageType);
     event.target.value = "";
   };
 
@@ -1775,7 +1766,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     event.preventDefault();
     const files = Array.from(event.dataTransfer?.files || []);
     if (!files.length) return;
-    void addImageToGallery(files, imageType, bulkFlattenAlpha);
+    void addImageToGallery(files, imageType);
   };
 
   const updateGalleryImage = (imageId, changes) => {
@@ -2027,31 +2018,10 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
           </div>
 
           <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h3 className="text-lg font-semibold text-white">Images</h3>
-                <p className="text-sm text-slate-400">
-                  Each color manages its own gallery and one primary image.
-                </p>
-              </div>
-              <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-white/10 bg-slate-900/70 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-white/5">
-                <input
-                  type="checkbox"
-                  checked={bulkFlattenAlpha}
-                  onChange={(event) => setBulkFlattenAlpha(event.target.checked)}
-                  className="rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500"
-                />
-                Flatten alpha (GMC)
-                <span className="group relative inline-flex">
-                  <span className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-slate-600 bg-slate-800 text-[10px] font-bold text-slate-400 transition hover:border-amber-500/50 hover:text-amber-300">
-                    ?
-                  </span>
-                  <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 w-64 -translate-x-1/2 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs leading-relaxed text-slate-300 shadow-xl opacity-0 transition group-hover:opacity-100">
-                    Google Merchant Center rejects transparent product images and flags them as “Invalid image encoding”. Enable this to flatten alpha onto a white background for feed compliance. Leave off to preserve transparency for your storefront.
-                  </span>
-                </span>
-              </label>
-            </div>
+            <h3 className="text-lg font-semibold text-white">Images</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Each color manages its own gallery and one primary image.
+            </p>
 
             {/* ── Bulk upload zone ──────────────────────────────────────── */}
             {draft.colors.length > 0 ? (
