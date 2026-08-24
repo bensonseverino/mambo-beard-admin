@@ -273,14 +273,10 @@ const formatCurrency = (value) =>
 
 const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png", "image/gif", "image/avif", "image/tiff", "image/bmp"];
 
-// Re-encodes an uploaded image to a clean, static WebP. Some design tools
-// export single-frame WebP files wrapped in a VP8X container with the
-// ANIMATION flag set (plus alpha/ICCP chunks); Google Merchant Center
-// rejects those as "Invalid image encoding". Canvas output is never
-// animated, so drawing the image through a canvas guarantees a clean file —
-// alpha preserved, EXIF orientation applied, animation stripped. Returns
-// null (the caller keeps the original file) when the browser cannot
-// decode/encode.
+// Re-encodes an uploaded image in its original format when resize is
+// needed (longest edge > MAX_IMAGE_DIMENSION). Animated GIFs and WebPs
+// are passed through as-is. Returns null when no resize is needed or
+// the browser cannot encode the source format.
 // Maximum longest-edge dimension for product images. Images larger than
 // this are scaled down (aspect-ratio preserved) before upload to keep
 // file sizes manageable and ensure fast page loads.
@@ -288,7 +284,6 @@ const MAX_IMAGE_DIMENSION = 2048;
 
 // Output quality for re-encoded uploads. AVIF at 0.75 matches WebP at 0.85
 // visually while being ~20% smaller. WebP is the fallback for older browsers.
-const AVIF_QUALITY = 0.75;
 const WEBP_QUALITY = 0.85;
 
 /**
@@ -299,22 +294,18 @@ const canvasToBlob = (canvas, mimeType, quality) =>
   new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
 
 /**
- * Re-encodes an uploaded image to a clean, modern format, optionally
- * resizing it down to MAX_IMAGE_DIMENSION on the longest edge.
+ * Re-encodes an uploaded image in its original format, resizing it down
+ * to MAX_IMAGE_DIMENSION on the longest edge when necessary. Returns
+ * null (the caller keeps the original file) when no resize is needed
+ * or the browser cannot encode the source MIME type.
  *
- * Encoding strategy:
- *   1. Try AVIF first — best compression (Chrome 96+, Firefox 93+,
- *      Safari 16.4+).
- *   2. Fall back to WebP — broader support (all modern browsers).
- *   3. Return null so the caller uploads the original file.
- *
- * Drawing through a canvas guarantees a clean file: alpha is preserved,
- * EXIF orientation applied, animation stripped. Animated GIFs and WebPs
- * are passed through as-is (canvas re-encoding destroys frames).
+ * Drawing through a canvas applies EXIF orientation and strips metadata.
+ * Animated GIFs and animated WebPs are passed through as-is (canvas
+ * re-encoding destroys frames).
  *
  * @param {File} file
- * @returns {Promise<File|null>} Optimized file, or null to keep original
- * (used for animated images and when the browser cannot encode AVIF/WebP).
+ * @returns {Promise<File|null>} Re-encoded file in the original format,
+ * or null to keep the original.
  */
 /**
  * Detect whether a WebP file is animated by inspecting the VP8X chunk
@@ -391,6 +382,9 @@ const reencodeImage = async (file) => {
       height = Math.round(srcHeight * scale);
     }
 
+    // No resize needed — upload the original to preserve exact format.
+    if (width === srcWidth && height === srcHeight) return null;
+
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -398,20 +392,18 @@ const reencodeImage = async (file) => {
     ctx.drawImage(source, 0, 0, width, height);
     if (typeof source.close === "function") source.close();
 
-    // 1) Try AVIF — smallest files at equal visual quality.
-    let blob = await canvasToBlob(canvas, "image/avif", AVIF_QUALITY);
-    if (blob && blob.type === "image/avif") {
-      return new File([blob], originalName + ".avif", { type: "image/avif" });
+    // Re-encode in the same format the user uploaded, so the file type
+    // is never silently changed. Falls back to the original when the
+    // browser cannot encode the source MIME type.
+    const srcType = file.type || "image/png";
+    const ext = srcType.split("/")[1] || "png";
+    const quality = srcType === "image/jpeg" ? WEBP_QUALITY : undefined;
+    let blob = await canvasToBlob(canvas, srcType, quality);
+    if (blob && blob.type) {
+      return new File([blob], originalName + "." + ext, { type: blob.type });
     }
 
-    // 2) Fall back to WebP — broader browser support.
-    blob = await canvasToBlob(canvas, "image/webp", WEBP_QUALITY);
-    if (blob && blob.type === "image/webp") {
-      return new File([blob], originalName + ".webp", { type: "image/webp" });
-    }
-
-    // 3) Browser cannot encode either format — let the caller upload
-    //    the original file.
+    // Browser cannot encode this format — upload the original file.
     return null;
   } catch {
     return null;
