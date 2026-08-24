@@ -309,12 +309,18 @@ const canvasToBlob = (canvas, mimeType, quality) =>
  *   3. Return null so the caller uploads the original file.
  *
  * Drawing through a canvas guarantees a clean file: alpha is preserved,
- * EXIF orientation applied, animation stripped.
+ * EXIF orientation applied, animation stripped. Animated GIFs are passed
+ * through as-is (canvas re-encoding destroys frames).
  *
  * @param {File} file
- * @returns {Promise<File|null>} Optimized file or null to keep original.
+ * @returns {Promise<File|null>} Optimized file, or null to keep original
+ * (used for GIFs and when the browser cannot encode AVIF/WebP).
  */
 const reencodeImage = async (file) => {
+  // GIFs are uploaded as-is: canvas re-encoding destroys animation frames
+  // and there is no AVIF/WebP animated fallback in all browsers yet.
+  if (file.type === "image/gif") return null;
+
   const originalName =
     (file.name || "image").replace(/\.[^.]+$/, "") || "image";
   try {
