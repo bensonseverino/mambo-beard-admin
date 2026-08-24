@@ -309,17 +309,52 @@ const canvasToBlob = (canvas, mimeType, quality) =>
  *   3. Return null so the caller uploads the original file.
  *
  * Drawing through a canvas guarantees a clean file: alpha is preserved,
- * EXIF orientation applied, animation stripped. Animated GIFs are passed
- * through as-is (canvas re-encoding destroys frames).
+ * EXIF orientation applied, animation stripped. Animated GIFs and WebPs
+ * are passed through as-is (canvas re-encoding destroys frames).
  *
  * @param {File} file
  * @returns {Promise<File|null>} Optimized file, or null to keep original
- * (used for GIFs and when the browser cannot encode AVIF/WebP).
+ * (used for animated images and when the browser cannot encode AVIF/WebP).
  */
+/**
+ * Detect whether a WebP file is animated by inspecting the VP8X chunk
+ * header. Returns false for static WebPs or on any read error.
+ *
+ * WebP container layout:
+ *   0-3   "RIFF"
+ *   4-7   file size
+ *   8-11  "WEBP"
+ *   12-15 "VP8X" (extended header)
+ *   16-19 chunk size (10)
+ *   20    flags byte — bit 2 (0x04) = animation
+ */
+const isAnimatedWebP = async (file) => {
+  try {
+    const buf = await file.slice(0, 24).arrayBuffer();
+    const v = new Uint8Array(buf);
+    if (
+      v[0] !== 0x52 || v[1] !== 0x49 || v[2] !== 0x46 || v[3] !== 0x52 // RIFF
+    )
+      return false;
+    if (
+      v[8] !== 0x57 || v[9] !== 0x45 || v[10] !== 0x42 || v[11] !== 0x50 // WEBP
+    )
+      return false;
+    if (
+      v[12] !== 0x56 || v[13] !== 0x50 || v[14] !== 0x38 || v[15] !== 0x58 // VP8X
+    )
+      return false;
+    return (v[20] & 0x04) !== 0; // animation flag
+  } catch {
+    return false;
+  }
+};
+
 const reencodeImage = async (file) => {
-  // GIFs are uploaded as-is: canvas re-encoding destroys animation frames
-  // and there is no AVIF/WebP animated fallback in all browsers yet.
+  // Animated GIFs and WebPs are uploaded as-is: canvas re-encoding
+  // destroys animation frames.
   if (file.type === "image/gif") return null;
+  if (file.type === "image/webp" && (await isAnimatedWebP(file))) return null;
 
   const originalName =
     (file.name || "image").replace(/\.[^.]+$/, "") || "image";
@@ -390,6 +425,11 @@ const imageTypeOptions = [
   "lifestyle",
   "gallery",
 ];
+
+const isGifImage = (image) => {
+  const name = (image.fileName || image.path || "").toLowerCase();
+  return name.endsWith(".gif") || name.includes(".gif?");
+};
 
 const formatBytes = (value) => {
   if (value < 1024) return `${value} B`;
@@ -2214,6 +2254,11 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                                     Primary
                                   </span>
                                 ) : null}
+                                {isGifImage(image) ? (
+                                  <span className="rounded-full bg-purple-500/15 px-3 py-1 text-xs font-medium text-purple-300">
+                                    GIF
+                                  </span>
+                                ) : null}
                                 <span className="text-xs text-slate-500">
                                   {formatBytes(image.size || 0)}
                                 </span>
@@ -2619,6 +2664,11 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                         {image.isPrimary ? (
                           <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-300">
                             Primary
+                          </span>
+                        ) : null}
+                        {isGifImage(image) ? (
+                          <span className="rounded-full bg-purple-500/15 px-3 py-1 text-xs font-medium text-purple-300">
+                            GIF
                           </span>
                         ) : null}
                         <span className="text-xs text-slate-500">
