@@ -273,141 +273,12 @@ const formatCurrency = (value) =>
 
 const acceptedImageTypes = ["image/webp", "image/jpeg", "image/png", "image/gif", "image/avif", "image/tiff", "image/bmp"];
 
-// Re-encodes an uploaded image in its original format when resize is
-// needed (longest edge > MAX_IMAGE_DIMENSION). Animated GIFs and WebPs
-// are passed through as-is. Returns null when no resize is needed or
-// the browser cannot encode the source format.
-// Maximum longest-edge dimension for product images. Images larger than
-// this are scaled down (aspect-ratio preserved) before upload to keep
-// file sizes manageable and ensure fast page loads.
-const MAX_IMAGE_DIMENSION = 2048;
-
-// Output quality for re-encoded uploads. AVIF at 0.75 matches WebP at 0.85
-// visually while being ~20% smaller. WebP is the fallback for older browsers.
-const WEBP_QUALITY = 0.85;
-
-/**
- * Attempt to encode a canvas to the given MIME type. Returns the Blob or
- * null when the browser does not support that encoder.
- */
-const canvasToBlob = (canvas, mimeType, quality) =>
-  new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
-
-/**
- * Re-encodes an uploaded image in its original format, resizing it down
- * to MAX_IMAGE_DIMENSION on the longest edge when necessary. Returns
- * null (the caller keeps the original file) when no resize is needed
- * or the browser cannot encode the source MIME type.
- *
- * Drawing through a canvas applies EXIF orientation and strips metadata.
- * Animated GIFs and animated WebPs are passed through as-is (canvas
- * re-encoding destroys frames).
- *
- * @param {File} file
- * @returns {Promise<File|null>} Re-encoded file in the original format,
- * or null to keep the original.
- */
-/**
- * Detect whether a WebP file is animated by inspecting the VP8X chunk
- * header. Returns false for static WebPs or on any read error.
- *
- * WebP container layout:
- *   0-3   "RIFF"
- *   4-7   file size
- *   8-11  "WEBP"
- *   12-15 "VP8X" (extended header)
- *   16-19 chunk size (10)
- *   20    flags byte — bit 2 (0x04) = animation
- */
-const isAnimatedWebP = async (file) => {
-  try {
-    const buf = await file.slice(0, 24).arrayBuffer();
-    const v = new Uint8Array(buf);
-    if (
-      v[0] !== 0x52 || v[1] !== 0x49 || v[2] !== 0x46 || v[3] !== 0x52 // RIFF
-    )
-      return false;
-    if (
-      v[8] !== 0x57 || v[9] !== 0x45 || v[10] !== 0x42 || v[11] !== 0x50 // WEBP
-    )
-      return false;
-    if (
-      v[12] !== 0x56 || v[13] !== 0x50 || v[14] !== 0x38 || v[15] !== 0x58 // VP8X
-    )
-      return false;
-    return (v[20] & 0x04) !== 0; // animation flag
-  } catch {
-    return false;
-  }
-};
-
+// Uploads every image as-is in its original format.
 const reencodeImage = async (file) => {
-  // Animated GIFs and WebPs are uploaded as-is: canvas re-encoding
-  // destroys animation frames.
-  if (file.type === "image/gif") return null;
-  if (file.type === "image/webp" && (await isAnimatedWebP(file))) return null;
-
-  const originalName =
-    (file.name || "image").replace(/\.[^.]+$/, "") || "image";
-  try {
-    let source;
-    try {
-      source = await createImageBitmap(file, {
-        imageOrientation: "from-image",
-      });
-    } catch {
-      const url = URL.createObjectURL(file);
-      try {
-        source = await new Promise((resolve, reject) => {
-          const el = new Image();
-          el.onload = () => resolve(el);
-          el.onerror = () => reject(new Error("decode failed"));
-          el.src = url;
-        });
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    }
-    const srcWidth = source.naturalWidth ?? source.width;
-    const srcHeight = source.naturalHeight ?? source.height;
-    if (!srcWidth || !srcHeight) return null;
-
-    // Scale down if the longest edge exceeds the cap; keep aspect ratio.
-    const longest = Math.max(srcWidth, srcHeight);
-    let width = srcWidth;
-    let height = srcHeight;
-    if (longest > MAX_IMAGE_DIMENSION) {
-      const scale = MAX_IMAGE_DIMENSION / longest;
-      width = Math.round(srcWidth * scale);
-      height = Math.round(srcHeight * scale);
-    }
-
-    // No resize needed — upload the original to preserve exact format.
-    if (width === srcWidth && height === srcHeight) return null;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(source, 0, 0, width, height);
-    if (typeof source.close === "function") source.close();
-
-    // Re-encode in the same format the user uploaded, so the file type
-    // is never silently changed. Falls back to the original when the
-    // browser cannot encode the source MIME type.
-    const srcType = file.type || "image/png";
-    const ext = srcType.split("/")[1] || "png";
-    const quality = srcType === "image/jpeg" ? WEBP_QUALITY : undefined;
-    let blob = await canvasToBlob(canvas, srcType, quality);
-    if (blob && blob.type) {
-      return new File([blob], originalName + "." + ext, { type: blob.type });
-    }
-
-    // Browser cannot encode this format — upload the original file.
-    return null;
-  } catch {
-    return null;
-  }
+  // Every image is uploaded as-is in its original format.
+  // No canvas re-encoding is performed — format, animation, and
+  // metadata are all preserved exactly.
+  return null;
 };
 const imageTypeOptions = [
   "front",
@@ -1472,10 +1343,8 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   };
 
   const enqueueUploads = async (colorId, files, imageType) => {
-    // Re-encode every picked file to a modern format (AVIF → WebP) before
-    // uploading: strips animation flags, resizes oversized images, and
-    // preserves transparency. Falls back to the original file if the
-    // browser cannot decode/encode.
+    // Pass every file through reencodeImage (currently a no-op that
+    // returns the original file as-is in its original format).
     const converted = await Promise.all(
       Array.from(files).map(async (file) => {
         const fixed = await reencodeImage(file);

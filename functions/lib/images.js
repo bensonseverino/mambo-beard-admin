@@ -2,8 +2,7 @@
 //
 // Some design tools (Photoshop / Illustrator WebP export, some converters)
 // write single-frame images wrapped in a VP8X container with the ANIMATION
-// flag set. The frontend re-encodes uploads through a canvas, which
-// strips the flag. This module retains isAnimatedWebp() for testing and
+// flag set. This module retains isAnimatedWebp() for testing and
 // utility use.
 
 const decoder = new TextDecoder("ascii");
