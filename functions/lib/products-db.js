@@ -158,6 +158,8 @@ export const normalizeProductPayload = (product) => {
     active: safeProduct.active !== false,
     variationType,
     productType: variationType === "none" ? "simple" : "variant",
+    // Optional size chart assignment (id from src/size-charts.js).
+    sizeChartId: safeProduct.sizeChartId ? String(safeProduct.sizeChartId).trim() : null,
     stock:
       variationType === "none" ? Math.max(0, toInt(safeProduct.stock)) : null,
     gallery,
@@ -285,6 +287,7 @@ const buildProductVariation = (
     active: Boolean(product.active),
     variationType,
     productType: variationType === "none" ? "simple" : "variant",
+    sizeChartId: product.size_chart_id || null,
     colors,
     sizes,
     gallery: color ? [] : galleryByProduct.get(product.id) || [],
@@ -307,7 +310,7 @@ export const listProducts = async (env, options = {}) => {
   const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
-        `SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type
+        `SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id
          FROM products${activeClause} ORDER BY created_at DESC`,
       ).all(),
       env.DB.prepare(
@@ -399,8 +402,8 @@ const insertProductStatement = (db, product) =>
   db
     .prepare(
       `
-    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, variation_type, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
     )
     .bind(
@@ -414,6 +417,7 @@ const insertProductStatement = (db, product) =>
       product.active ? 1 : 0,
       product.productType === "simple" ? "simple" : "variant",
       product.variationType,
+      product.sizeChartId || null,
       product.createdAt,
       product.updatedAt,
     );
@@ -699,7 +703,7 @@ export const getProductDetail = async (env, key) => {
   // Only the columns buildProductVariation and the response actually read.
   const product = await env.DB
     .prepare(
-      "SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type FROM products WHERE (id = ? OR slug = ?) AND active = 1",
+      "SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id FROM products WHERE (id = ? OR slug = ?) AND active = 1",
     )
     .bind(key, key)
     .first();
@@ -817,6 +821,7 @@ export const getProductDetail = async (env, key) => {
       active: built.active,
       variationType: built.variationType,
       productType: built.productType,
+      sizeChartId: built.sizeChartId,
     },
     colors: built.colors,
     sizes: built.sizes,

@@ -9,6 +9,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import "./App.css";
+import { SIZE_CHARTS, getSizeChart } from "./size-charts.js";
 
 const navItems = [
   { to: "/", label: "Dashboard" },
@@ -907,6 +908,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
     sizes: [],
     gallery: [],
     stock: "",
+    sizeChartId: "",
   });
   const [uploadQueues, setUploadQueues] = useState({});
   const [typeFilter, setTypeFilter] = useState("all");
@@ -937,8 +939,8 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   const variationType = resolveVariationType(draft);
   const hasColor = hasColorVariation(variationType);
   const hasSize = hasSizeVariation(variationType);
-
-  // The sizes the draft currently tracks; when none are tracked yet, every
+  // The size chart previewed and saved with the product (null = none).
+  const selectedSizeChart = getSizeChart(draft.sizeChartId || "");
   // catalog size is assumed enabled so the form starts fully unchecked-free.
   const activeSizes = useMemo(() => {
     if (draft.sizes?.length) return draft.sizes;
@@ -1070,6 +1072,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
         sizes: [],
         gallery: [],
         stock: "",
+        sizeChartId: "",
       });
     } catch (error) {
       console.error("Unable to save product", error);
@@ -1832,6 +1835,74 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                 />
               </label>
             </div>
+          </div>
+
+          <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+            <h3 className="text-lg font-semibold text-white">Size Chart</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Assign a reference size chart so shoppers can check fit. Charts
+              live in src/size-charts.js.
+            </p>
+            <label className="mt-4 block max-w-md text-sm font-medium text-slate-200">
+              Chart
+              <select
+                value={draft.sizeChartId || ""}
+                onChange={(event) =>
+                  setDraft({ ...draft, sizeChartId: event.target.value })
+                }
+                className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950/80 px-3 py-3 text-sm text-white"
+              >
+                <option value="">No size chart</option>
+                {SIZE_CHARTS.map((chart) => (
+                  <option key={chart.id} value={chart.id}>
+                    {chart.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedSizeChart ? (
+              <div className="mt-4 overflow-x-auto">
+                <p className="text-xs uppercase tracking-wide text-slate-500">
+                  {selectedSizeChart.title} — {selectedSizeChart.unit}
+                </p>
+                <table className="mt-2 w-full min-w-[640px] border-collapse text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-400">
+                      <th className="border border-white/10 px-2 py-1.5 font-medium">
+                        Measurement
+                      </th>
+                      {selectedSizeChart.sizes.map((size) => (
+                        <th
+                          key={size}
+                          className="border border-white/10 px-2 py-1.5 font-medium"
+                        >
+                          {size}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="text-slate-300">
+                    {Object.entries(selectedSizeChart.measurements).map(
+                      ([label, values]) => (
+                        <tr key={label}>
+                          <th className="border border-white/10 px-2 py-1.5 text-left font-medium text-slate-200">
+                            {label}
+                          </th>
+                          {values.map((value, valueIndex) => (
+                            <td
+                              key={`${label}-${valueIndex}`}
+                              className="border border-white/10 px-2 py-1.5"
+                            >
+                              {value}
+                            </td>
+                          ))}
+                        </tr>
+                      ),
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
           </div>
 
           {hasColor ? (
@@ -2784,6 +2855,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                           setDraft({
                             ...product,
                             id: product.id,
+                            sizeChartId: product.sizeChartId || "",
                             variationType: rowVariationType,
                             colors: (product.colors || []).map((color) => ({
                               ...color,

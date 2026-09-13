@@ -19,6 +19,9 @@ export const SCHEMA_STATEMENTS = [
     active INTEGER NOT NULL DEFAULT 1,
     product_type TEXT NOT NULL DEFAULT 'variant',
     variation_type TEXT NOT NULL DEFAULT 'color_size',
+    -- Optional reference into the size chart library (src/size-charts.js);
+    -- NULL means the product displays no size chart.
+    size_chart_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
