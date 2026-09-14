@@ -137,3 +137,42 @@ export const toPublicChart = (chart) => ({
 });
 
 export const listPublicSizeCharts = () => SIZE_CHARTS.map(toPublicChart);
+
+/**
+ * Resolve a chart into the columns/rows shape the storefront renders:
+ *
+ *   { columns: ["Chest (in)", "Length (in)"],
+ *     rows: [{ size: "S", measurements: ["34", "26"] }] }
+ *
+ * One column per measurement and one row per size, in library order, with
+ * every value as a string so the stored JSON matches the storefront's
+ * documented shape. The unit lives in the column label because the
+ * storefront table renders nothing but columns and rows; UK/US size bands
+ * are labels, not measurements, so they carry no unit suffix.
+ *
+ * The admin writes this payload to products.size_chart as JSON on every
+ * save, so the storefront never needs to know about the chart library.
+ */
+export const toProductSizeChart = (chart) => {
+  if (!chart) return null;
+  const measurements = Object.entries(chart.measurements || {});
+  const sizes = chart.sizes || [];
+  if (!measurements.length || !sizes.length) return null;
+
+  return {
+    columns: measurements.map(([name]) =>
+      /\bsize\b/i.test(name) ? name : `${name} (in)`,
+    ),
+    rows: sizes.map((size, index) => ({
+      size,
+      measurements: measurements.map(([, values]) => {
+        const value = values[index];
+        return value == null ? "" : String(value);
+      }),
+    })),
+  };
+};
+
+/** The storefront payload for an assigned chart id (null when unassigned). */
+export const buildProductSizeChart = (chartId) =>
+  toProductSizeChart(getSizeChart(String(chartId || "").trim()));

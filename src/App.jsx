@@ -918,6 +918,9 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
   const [bulkImageType, setBulkImageType] = useState("front");
   // Drag-over highlight for the global drop zone.
   const [bulkDragOver, setBulkDragOver] = useState(false);
+  // A rejected save used to fail silently (console.error only), which made it
+  // impossible to tell an unsaved product from a saved one.
+  const [saveError, setSaveError] = useState("");
 
   // Load the size catalog from the API so new sizes need no code changes.
   useEffect(() => {
@@ -967,6 +970,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
 
   const saveProduct = async (event) => {
     event.preventDefault();
+    setSaveError("");
     const selectedSizes = activeSizes.filter((size) => size.enabled !== false);
     const normalized = {
       ...draft,
@@ -1076,6 +1080,7 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
       });
     } catch (error) {
       console.error("Unable to save product", error);
+      setSaveError(error?.message || "Unable to save product.");
     }
   };
 
@@ -2766,6 +2771,11 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
               >
                 Save product
               </button>
+              {saveError ? (
+                <p className="mt-3 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+                  {saveError}
+                </p>
+              ) : null}
             </div>
           </div>
         </form>

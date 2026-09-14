@@ -6,6 +6,13 @@
 // CREATE TABLE IF NOT EXISTS — an idempotent, cheap no-op once the tables
 // exist. This guarantees `orders` / `order_items` / `inventory` / `sizes`
 // are always present and eliminates `no such table` errors.
+//
+// It is also the repair path for a database that already exists: CREATE TABLE
+// IF NOT EXISTS cannot widen a table that is already there, so columns added
+// later are backfilled with ALTER TABLE and the values derived from them are
+// reconciled (see ensureColumn and backfillProductSizeCharts below).
+
+import { buildProductSizeChart } from "../../src/size-charts.js";
 
 export const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS products (
@@ -20,8 +27,11 @@ export const SCHEMA_STATEMENTS = [
     product_type TEXT NOT NULL DEFAULT 'variant',
     variation_type TEXT NOT NULL DEFAULT 'color_size',
     -- Optional reference into the size chart library (src/size-charts.js);
-    -- NULL means the product displays no size chart.
+    -- NULL means the product displays no size chart. size_chart holds the
+    -- same chart resolved to columns/rows JSON, which is what the storefront
+    -- renders. Both are written together by products-db.js.
     size_chart_id TEXT,
+    size_chart TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -177,6 +187,52 @@ export const SIZE_SEED_STATEMENT = `INSERT OR IGNORE INTO sizes (id, name) VALUE
  */
 const ensuredDatabases = new WeakMap();
 
+/**
+ * Add a column to an existing table when it is missing.
+ *
+ * SCHEMA_STATEMENTS uses CREATE TABLE IF NOT EXISTS, which is a no-op on a
+ * table that already exists — so a column added to this file is invisible on
+ * every database created before it, and every query that names it fails with
+ * "no such column". Columns the API reads or writes are therefore backfilled
+ * here, which is also what makes the migrations/*.sql files optional at deploy
+ * time (the dashboard and the storefront share one D1 instance).
+ */
+export const ensureColumn = async (db, table, column, definition) => {
+  const info = await db.prepare(`PRAGMA table_info(${table})`).all();
+  const exists = (info.results || []).some((entry) => entry.name === column);
+  if (exists) return;
+  await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+};
+
+/**
+ * Resolve chart assignments that predate products.size_chart.
+ *
+ * A product saved while only the id column existed carries size_chart_id and
+ * no payload, so its storefront page renders no chart even though the admin
+ * shows one assigned. Resolving those rows in place means the fix applies to
+ * existing products instead of only to products saved after it.
+ */
+const backfillProductSizeCharts = async (db) => {
+  const rows = await db
+    .prepare(
+      "SELECT id, size_chart_id FROM products WHERE size_chart_id IS NOT NULL AND size_chart IS NULL",
+    )
+    .all();
+
+  const pending = (rows.results || [])
+    .map((row) => ({ id: row.id, chart: buildProductSizeChart(row.size_chart_id) }))
+    .filter((row) => row.chart);
+  if (!pending.length) return;
+
+  await db.batch(
+    pending.map((row) =>
+      db
+        .prepare("UPDATE products SET size_chart = ? WHERE id = ?")
+        .bind(JSON.stringify(row.chart), row.id),
+    ),
+  );
+};
+
 export const ensureSchema = async (env) => {
   const db = env?.DB;
   if (!db) return;
@@ -190,6 +246,25 @@ export const ensureSchema = async (env) => {
   ).map((sql) => db.prepare(sql));
   statements.push(db.prepare(SIZE_SEED_STATEMENT));
   await db.batch(statements);
+
+  // Columns added after a database was first created (migrations 0003, 0005,
+  // 0006, 0007). A shared database can be older than this code, so backfill
+  // them instead of trusting that `wrangler d1 migrations apply` ever ran.
+  await ensureColumn(
+    db,
+    "products",
+    "product_type",
+    "TEXT NOT NULL DEFAULT 'variant'",
+  );
+  await ensureColumn(
+    db,
+    "products",
+    "variation_type",
+    "TEXT NOT NULL DEFAULT 'color_size'",
+  );
+  await ensureColumn(db, "products", "size_chart_id", "TEXT");
+  await ensureColumn(db, "products", "size_chart", "TEXT");
+  await backfillProductSizeCharts(db);
 
   // Indexes can fail on pre-existing dirty data (e.g. duplicate customer
   // phones or duplicate inventory combinations). Catch each one so a single

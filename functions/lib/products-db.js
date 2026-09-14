@@ -1,4 +1,5 @@
 import { apiError, ensureSchema } from "./schema.js";
+import { buildProductSizeChart } from "../../src/size-charts.js";
 
 // Per-product variation configuration. The admin dashboard is the source of
 // truth: every product carries exactly one of these values.
@@ -21,6 +22,25 @@ const slugifyValue = (value) =>
 
 const buildPreviewUrl = (path) =>
   path ? `/api/media/${encodeURIComponent(path)}` : "";
+
+/**
+ * Parse the storefront size chart JSON stored on the product row. Written by
+ * normalizeProductPayload on every save in the columns/rows shape the
+ * storefront renders; empty or malformed values degrade to null so the
+ * storefront hides its size chart control instead of breaking the page.
+ */
+const parseStoredSizeChart = (raw) => {
+  if (raw == null) return null;
+  if (typeof raw === "object") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && Array.isArray(parsed.columns) && Array.isArray(parsed.rows)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+};
 
 const buildColorId = (index) => `color-${Date.now()}-${index}`;
 const buildImageId = (index) => `image-${Date.now()}-${index}`;
@@ -147,6 +167,15 @@ export const normalizeProductPayload = (product) => {
             : (safeProduct.colors || []).flatMap((c) => c.images || []),
         );
 
+  // Optional size chart selection (a chart id from src/size-charts.js). The
+  // storefront renders columns/rows, so the assignment is resolved into that
+  // payload here and persisted alongside it: the id is what the admin form
+  // reloads, the payload is what the storefront reads. Removing the chart
+  // clears both, so they can never drift apart.
+  const sizeChartId = safeProduct.sizeChartId
+    ? String(safeProduct.sizeChartId).trim()
+    : null;
+
   return {
     id: String(safeProduct.id || `prod-${Date.now()}`),
     name: String(safeProduct.name || "").trim(),
@@ -158,8 +187,8 @@ export const normalizeProductPayload = (product) => {
     active: safeProduct.active !== false,
     variationType,
     productType: variationType === "none" ? "simple" : "variant",
-    // Optional size chart assignment (id from src/size-charts.js).
-    sizeChartId: safeProduct.sizeChartId ? String(safeProduct.sizeChartId).trim() : null,
+    sizeChartId,
+    sizeChart: buildProductSizeChart(sizeChartId),
     stock:
       variationType === "none" ? Math.max(0, toInt(safeProduct.stock)) : null,
     gallery,
@@ -288,6 +317,7 @@ const buildProductVariation = (
     variationType,
     productType: variationType === "none" ? "simple" : "variant",
     sizeChartId: product.size_chart_id || null,
+    sizeChart: parseStoredSizeChart(product.size_chart),
     colors,
     sizes,
     gallery: color ? [] : galleryByProduct.get(product.id) || [],
@@ -310,7 +340,7 @@ export const listProducts = async (env, options = {}) => {
   const [productsResult, colorsResult, imagesResult, variantsResult, inventoryResult, sizesResult] =
     await Promise.all([
       env.DB.prepare(
-        `SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id
+        `SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id, size_chart
          FROM products${activeClause} ORDER BY created_at DESC`,
       ).all(),
       env.DB.prepare(
@@ -402,8 +432,8 @@ const insertProductStatement = (db, product) =>
   db
     .prepare(
       `
-    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO products (id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id, size_chart, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
     )
     .bind(
@@ -418,6 +448,8 @@ const insertProductStatement = (db, product) =>
       product.productType === "simple" ? "simple" : "variant",
       product.variationType,
       product.sizeChartId || null,
+      // Denormalized for the storefront: columns/rows JSON it renders directly.
+      product.sizeChart ? JSON.stringify(product.sizeChart) : null,
       product.createdAt,
       product.updatedAt,
     );
@@ -703,7 +735,7 @@ export const getProductDetail = async (env, key) => {
   // Only the columns buildProductVariation and the response actually read.
   const product = await env.DB
     .prepare(
-      "SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id FROM products WHERE (id = ? OR slug = ?) AND active = 1",
+      "SELECT id, name, slug, description, price, category, featured, active, product_type, variation_type, size_chart_id, size_chart FROM products WHERE (id = ? OR slug = ?) AND active = 1",
     )
     .bind(key, key)
     .first();
@@ -822,6 +854,7 @@ export const getProductDetail = async (env, key) => {
       variationType: built.variationType,
       productType: built.productType,
       sizeChartId: built.sizeChartId,
+      sizeChart: built.sizeChart,
     },
     colors: built.colors,
     sizes: built.sizes,

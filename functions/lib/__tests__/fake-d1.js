@@ -3,6 +3,8 @@
 // Supports the SQL subset used by the admin backend:
 //   CREATE TABLE IF NOT EXISTS ...
 //   CREATE [UNIQUE] INDEX IF NOT EXISTS ... (no-op)
+//   PRAGMA table_info(t)  (columns recorded from CREATE / ALTER)
+//   ALTER TABLE t ADD COLUMN c <definition>
 //   INSERT [OR IGNORE] INTO t (cols) VALUES (...), (...)
 //   INSERT INTO t (cols) VALUES (...) ON CONFLICT(col) DO UPDATE SET ...
 //   SELECT cols FROM t [WHERE ...] [ORDER BY ...] [LIMIT n]
@@ -61,6 +63,16 @@ const applyUpsertSet = (existing, incoming, setClause) => {
     existing[column] = toScalar(expression);
   }
 };
+
+/** Drop `-- ...` line comments so schema parsing sees only definitions. */
+const stripSqlComments = (sql) =>
+  sql
+    .split("\n")
+    .map((line) => {
+      const index = line.indexOf("--");
+      return index === -1 ? line : line.slice(0, index);
+    })
+    .join("\n");
 
 const stripQuotes = (value) =>
   value.startsWith("'") && value.endsWith("'")
@@ -183,21 +195,72 @@ const parseOrderBy = (clause) =>
 
 export function createFakeD1() {
   const tables = new Map();
+  // Column names per table, so PRAGMA table_info works like the real D1 and
+  // ensureColumn() can decide whether an ALTER TABLE is needed.
+  const schema = new Map();
 
   const rowsOf = (name) => {
     if (!tables.has(name)) tables.set(name, []);
     return tables.get(name);
   };
 
+  const columnsOf = (name) => {
+    if (!schema.has(name)) schema.set(name, []);
+    return schema.get(name);
+  };
+
+  const addColumn = (name, column) => {
+    const columns = columnsOf(name);
+    if (!columns.includes(column)) columns.push(column);
+  };
+
   const runSql = (sql, bindings = []) => {
     const statement = sql.replace(/\s+/g, " ").trim();
 
-    let    match = statement.match(
-      /^CREATE TABLE IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s*\(.*\)$/i,
+    let match = statement.match(
+      /^CREATE TABLE IF NOT EXISTS ([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)$/i,
     );
     if (match) {
+      // CREATE TABLE IF NOT EXISTS is a no-op on an existing table — in real
+      // D1 it does NOT add columns, which is exactly why ensureColumn() exists.
+      const existed = tables.has(match[1]);
       rowsOf(match[1]);
+      // Column definitions are the first token of each top-level part; the
+      // table constraints (FOREIGN KEY / PRIMARY KEY / ...) are not columns.
+      // Line comments are stripped first because a column can follow one.
+      const body = stripSqlComments(sql).replace(/\s+/g, " ").trim();
+      const inner = body.slice(body.indexOf("(") + 1, body.lastIndexOf(")"));
+      if (!existed) {
+        for (const part of splitTopLevel(inner, ",")) {
+          const name = part.trim().split(/\s+/)[0];
+          if (
+            name &&
+            !/^(FOREIGN|PRIMARY|UNIQUE|CONSTRAINT|CHECK)$/i.test(name)
+          ) {
+            addColumn(match[1], name);
+          }
+        }
+      }
       return { success: true };
+    }
+
+    // PRAGMA table_info(t) — the format ensureColumn() reads.
+    match = statement.match(/^PRAGMA table_info\(([a-zA-Z_][a-zA-Z0-9_]*)\)$/i);
+    if (match) {
+      return {
+        success: true,
+        results: columnsOf(match[1]).map((name) => ({ name })),
+      };
+    }
+
+    // ALTER TABLE t ADD COLUMN c <definition> — the definition is not
+    // interpreted; only the column's existence matters to callers.
+    match = statement.match(
+      /^ALTER TABLE ([a-zA-Z_][a-zA-Z0-9_]*) ADD COLUMN ([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    );
+    if (match) {
+      addColumn(match[1], match[2]);
+      return { success: true, meta: { changes: 0, last_row_id: 0 } };
     }
 
     match = statement.match(
@@ -479,5 +542,6 @@ export function createFakeD1() {
     // Test introspection helpers.
     _tables: tables,
     _rows: (name) => rowsOf(name).map((row) => ({ ...row })),
+    _columns: (name) => [...columnsOf(name)],
   };
 }
