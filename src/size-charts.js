@@ -7,7 +7,7 @@
 //
 // Every measurement is garment-side and strictly in inches:
 //   • number — a single measured value
-//   • "A-B"  — a range (UK/US size bands, or a body range a size fits)
+//   • "A-B"  — a range (for example, a body range a size fits)
 //
 // Values are rendered verbatim in the admin preview and the storefront table.
 //
@@ -36,8 +36,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["womens-sweatpants", "womens-joggers"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL", "3XL"],
     measurements: {
-      "UK Size": ["6-8", "8-10", "10-12", "12-14", "14-16", "16-18", "18-20"],
-      "US Size": ["8-10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22"],
       Waist: ["25-28", "28-31", "30-33", "32-35", "34-37", "36-39", "38-41"],
       Hips: [39, 42, 46, 49, 52, 56, 60],
       Thigh: [22, 24, 26, 29, 33, 37, 40],
@@ -52,8 +50,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["t-shirts", "graphic-tees", "crewneck-tees"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL", "3XL"],
     measurements: {
-      "UK Size": ["4-6", "6-8", "8-10", "10-12", "12-14", "14-16", "16-18"],
-      "US Size": ["8-10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22"],
       Length: [26, 27, 28, 29, 30, 31, 32],
       Chest: [32, 34, 36, 38, 40, 42, 44],
       "Across Shoulder": [13, 14, 15, 16, 17, 18, 19],
@@ -68,8 +64,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["cropped-tshirts", "crop-tops"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL"],
     measurements: {
-      "UK Size": ["0-2", "2-4", "6-8", "10-12", "14-16", "18-20"],
-      "US Size": ["2-4", "4-6", "8-10", "12-14", "16-18", "20-22"],
       Chest: [34, 36, 38, 40, 42, 44],
       Shoulders: [13, 14, 15, 16, 17, 18],
       Sleeve: [6, 7, 8, 9, 10, 11],
@@ -83,8 +77,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["tshirt-dresses"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL", "3XL"],
     measurements: {
-      "UK Size": ["6-8", "8-10", "10-12", "12-14", "14-16", "16-18", "18-20"],
-      "US Size": ["8-10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22"],
       "Dress Length": [31, 32, 33, 34, 35, 36, 37],
       Chest: [34, 36, 38, 40, 42, 44, 46],
       "Across Shoulder": [13, 14, 15, 16, 17, 18, 19],
@@ -97,8 +89,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["hoodies", "pullovers", "zip-hoodies"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL", "3XL"],
     measurements: {
-      "UK Size": ["6-8", "8-10", "10-12", "12-14", "14-16", "16-18", "18-20"],
-      "US Size": ["8-10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22"],
       Length: [26, 27, 28, 29, 30, 31, 32],
       Chest: [36, 38, 40, 44, 46, 48, 50],
       "Across Shoulder": [16, 17, 18, 19, 20, 21, 22],
@@ -112,8 +102,6 @@ export const SIZE_CHARTS = [
     appliesTo: ["college-jackets", "varsity-jackets", "bomber-jackets"],
     sizes: ["XS", "S", "M", "L", "XL", "2XL", "3XL"],
     measurements: {
-      "UK Size": ["6-8", "8-10", "10-12", "12-14", "14-16", "16-18", "18-20"],
-      "US Size": ["8-10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22"],
       "Body Length": [26, 27, 28, 29, 30, 31, 32],
       Chest: [36, 38, 40, 44, 46, 48, 50],
       "Across Shoulder": [16, 17, 18, 19, 20, 21, 22],
@@ -147,8 +135,7 @@ export const listPublicSizeCharts = () => SIZE_CHARTS.map(toPublicChart);
  * One column per measurement and one row per size, in library order, with
  * every value as a string so the stored JSON matches the storefront's
  * documented shape. The unit lives in the column label because the
- * storefront table renders nothing but columns and rows; UK/US size bands
- * are labels, not measurements, so they carry no unit suffix.
+ * storefront table renders nothing but columns and rows.
  *
  * The admin writes this payload to products.size_chart as JSON on every
  * save, so the storefront never needs to know about the chart library.

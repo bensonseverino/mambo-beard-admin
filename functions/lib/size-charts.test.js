@@ -84,13 +84,11 @@ test("charts resolve into the storefront columns/rows payload", () => {
     ),
   );
 
-  // UK/US size bands are labels, not garment measurements, so the unit suffix
-  // is reserved for the measurements that are actually in inches.
+  // Only actual garment measurements remain in the stored payload; the size
+  // labels are still carried by the `size` column in each row.
   assert.deepEqual(
     toProductSizeChart(getSizeChart("size-chart-tshirts")).columns,
     [
-      "UK Size",
-      "US Size",
       "Length (in)",
       "Chest (in)",
       "Across Shoulder (in)",
@@ -173,7 +171,7 @@ test("assignments made before size_chart existed render without a re-save", asyn
 
   const [product] = await listProducts(env);
   assert.equal(product.sizeChartId, "size-chart-hoodies");
-  assert.equal(product.sizeChart.columns.length, 6);
+  assert.equal(product.sizeChart.columns.length, 4);
   assert.equal(product.sizeChart.rows.length, 7);
   assert.equal(product.sizeChart.rows[0].size, "XS");
 });
@@ -208,22 +206,15 @@ test("products persist and expose their size chart assignment", async () => {
   // The assignment is resolved into the columns/rows JSON the storefront
   // renders — storing only the id is what left the storefront blank.
   assert.deepEqual(JSON.parse(storedRows["prod-hoodie"].size_chart), {
-    columns: [
-      "UK Size",
-      "US Size",
-      "Length (in)",
-      "Chest (in)",
-      "Across Shoulder (in)",
-      "Sleeve (in)",
-    ],
+    columns: ["Length (in)", "Chest (in)", "Across Shoulder (in)", "Sleeve (in)"],
     rows: [
-      { size: "XS", measurements: ["6-8", "8-10", "26", "36", "16", "21.5"] },
-      { size: "S", measurements: ["8-10", "10-12", "27", "38", "17", "22.5"] },
-      { size: "M", measurements: ["10-12", "12-14", "28", "40", "18", "24"] },
-      { size: "L", measurements: ["12-14", "14-16", "29", "44", "19", "26"] },
-      { size: "XL", measurements: ["14-16", "16-18", "30", "46", "20", "27"] },
-      { size: "2XL", measurements: ["16-18", "18-20", "31", "48", "21", "28"] },
-      { size: "3XL", measurements: ["18-20", "20-22", "32", "50", "22", "28"] },
+      { size: "XS", measurements: ["26", "36", "16", "21.5"] },
+      { size: "S", measurements: ["27", "38", "17", "22.5"] },
+      { size: "M", measurements: ["28", "40", "18", "24"] },
+      { size: "L", measurements: ["29", "44", "19", "26"] },
+      { size: "XL", measurements: ["30", "46", "20", "27"] },
+      { size: "2XL", measurements: ["31", "48", "21", "28"] },
+      { size: "3XL", measurements: ["32", "50", "22", "28"] },
     ],
   });
   // No chart means NULL on both columns, never an empty payload.

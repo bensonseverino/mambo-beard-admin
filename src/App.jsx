@@ -1873,37 +1873,37 @@ function ProductsView({ state, updateState, isLoadingProducts }) {
                 <table className="mt-2 w-full min-w-[640px] border-collapse text-sm">
                   <thead>
                     <tr className="text-left text-slate-400">
-                      <th className="border border-white/10 px-2 py-1.5 font-medium">
-                        Measurement
+                      <th className="border border-white/10 bg-slate-900 px-2 py-1.5 font-medium uppercase tracking-wide text-slate-200">
+                        Size
                       </th>
-                      {selectedSizeChart.sizes.map((size) => (
+                      {Object.keys(selectedSizeChart.measurements).map((label) => (
                         <th
-                          key={size}
-                          className="border border-white/10 px-2 py-1.5 font-medium"
+                          key={label}
+                          className="border border-white/10 bg-slate-900 px-2 py-1.5 font-medium uppercase tracking-wide text-slate-200"
                         >
-                          {size}
+                          {label}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="text-slate-300">
-                    {Object.entries(selectedSizeChart.measurements).map(
-                      ([label, values]) => (
-                        <tr key={label}>
-                          <th className="border border-white/10 px-2 py-1.5 text-left font-medium text-slate-200">
-                            {label}
-                          </th>
-                          {values.map((value, valueIndex) => (
+                    {selectedSizeChart.sizes.map((size, sizeIndex) => (
+                      <tr key={size}>
+                        <th className="border border-white/10 bg-slate-950/80 px-2 py-1.5 text-left font-medium text-slate-200">
+                          {size}
+                        </th>
+                        {Object.values(selectedSizeChart.measurements).map(
+                          (values, measurementIndex) => (
                             <td
-                              key={`${label}-${valueIndex}`}
+                              key={`${size}-${Object.keys(selectedSizeChart.measurements)[measurementIndex]}`}
                               className="border border-white/10 px-2 py-1.5"
                             >
-                              {value}
+                              {values[sizeIndex]}
                             </td>
-                          ))}
-                        </tr>
-                      ),
-                    )}
+                          ),
+                        )}
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
