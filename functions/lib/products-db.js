@@ -669,10 +669,17 @@ export const updateProduct = async (env, productId, payload) => {
 
   // Partial updates that only touch the active flag (e.g. restore from a
   // soft delete) update the flag directly instead of rebuilding the product.
-  // The guard is strict: `active` must be the sole key in the payload so a
+  // The guard is strict: the flag must be the sole key in the payload so a
   // full product update can never be misclassified.
   const payloadKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
   if (payloadKeys.length === 1 && payload.active !== undefined) {
+    // The slug comes back with the write so the caller purges the storefront's
+    // slug-keyed detail cache too, not just the id-keyed one.
+    const existing = await env.DB.prepare(
+      "SELECT slug FROM products WHERE id = ?",
+    )
+      .bind(productId)
+      .first();
     const result = await env.DB.prepare(
       "UPDATE products SET active = ?, updated_at = ? WHERE id = ?",
     )
@@ -681,7 +688,56 @@ export const updateProduct = async (env, productId, payload) => {
     if (!result?.meta?.changes) {
       throw apiError("PRODUCT_NOT_FOUND", "Product not found.", 404);
     }
-    return { id: productId, active: Boolean(payload.active) };
+    return {
+      id: productId,
+      slug: existing?.slug,
+      active: Boolean(payload.active),
+    };
+  }
+
+  // Changing which chart a product shows touches exactly one denormalized
+  // column pair, so it takes the same cheap path as `active` — one UPDATE
+  // instead of a rebuild. That matters beyond performance: a rebuild deletes
+  // and re-inserts every color, image, variant and inventory row and stamps
+  // created_at = now, which reshuffles the catalog for both the admin list and
+  // the storefront, since both order by created_at. Reassigning a chart (or
+  // clearing it with null) is routine, and it should not move the product.
+  // The guard is strict for the same reason as above: `sizeChartId` must be
+  // the sole key, so a full product save that happens to carry a chart is
+  // still normalized and rebuilt as before.
+  if (payloadKeys.length === 1 && payload.sizeChartId !== undefined) {
+    const sizeChartId = payload.sizeChartId
+      ? String(payload.sizeChartId).trim()
+      : null;
+    // Resolved from the same library the full save uses, so both paths store
+    // an identical payload; an unknown id resolves to null (no chart shown).
+    const sizeChart = buildProductSizeChart(sizeChartId);
+    // Same reason as above: the caller needs the slug to purge the storefront
+    // page cached under it.
+    const existing = await env.DB.prepare(
+      "SELECT slug FROM products WHERE id = ?",
+    )
+      .bind(productId)
+      .first();
+    const result = await env.DB.prepare(
+      "UPDATE products SET size_chart_id = ?, size_chart = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        sizeChartId,
+        sizeChart ? JSON.stringify(sizeChart) : null,
+        new Date().toISOString(),
+        productId,
+      )
+      .run();
+    if (!result?.meta?.changes) {
+      throw apiError("PRODUCT_NOT_FOUND", "Product not found.", 404);
+    }
+    return {
+      id: productId,
+      slug: existing?.slug,
+      sizeChartId,
+      sizeChart,
+    };
   }
 
   const normalized = normalizeProductPayload({ ...payload, id: productId });

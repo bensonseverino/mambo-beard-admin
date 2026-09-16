@@ -138,6 +138,8 @@ test("updateProduct restores a soft-deleted product via the active flag", async 
 
   const restored = await updateProduct(env, "prod-1", { active: true });
   assert.equal(restored.active, true);
+  // Returned so the caller can purge the storefront's slug-keyed cache entry.
+  assert.equal(restored.slug, "classic-beard-oil");
   assert.equal(env.DB._rows("products")[0].active, 1);
   assert.equal((await listProducts(env)).length, 1);
 });
